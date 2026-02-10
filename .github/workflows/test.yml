@@ -1,0 +1,75 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package and test dependencies
+        run: pip install . pytest
+
+      - name: Run unit tests
+        run: pytest tests/ -v --ignore=tests/test_integration.py
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install FUSE
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3 libfuse3-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Clone branchfs
+        run: git clone https://github.com/multikernel/branchfs.git branchfs
+
+      - name: Cache branchfs build
+        uses: actions/cache@v4
+        with:
+          path: branchfs/target
+          key: branchfs-${{ runner.os }}-${{ hashFiles('branchfs/Cargo.lock') }}
+          restore-keys: branchfs-${{ runner.os }}-
+
+      - name: Build branchfs
+        run: cargo build --release --manifest-path branchfs/Cargo.toml
+
+      - name: Mount branchfs
+        run: |
+          mkdir -p /tmp/branchfs-base /tmp/branchfs /tmp/branchfs-storage
+          ./branchfs/target/release/branchfs mount --base /tmp/branchfs-base --storage /tmp/branchfs-storage /tmp/branchfs
+          # Wait for FUSE mount to be ready
+          timeout 10 bash -c 'until mountpoint -q /tmp/branchfs; do sleep 0.1; done'
+
+      - name: Install package and test dependencies
+        run: pip install . pytest
+
+      - name: Run integration tests
+        env:
+          BRANCHFS_MOUNT: /tmp/branchfs
+        run: pytest tests/test_integration.py -v
+
+      - name: Unmount branchfs
+        if: always()
+        run: fusermount3 -u /tmp/branchfs || true
