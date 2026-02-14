@@ -39,7 +39,7 @@ raises, everything is rolled back - the workspace is untouched.
 
 ## Agent patterns
 
-BranchContext ships with five high-level patterns that cover the most common
+BranchContext ships with six high-level patterns that cover the most common
 agent workflows. Each is a callable class: instantiate with config, call with
 a workspace.
 
@@ -139,6 +139,42 @@ outcome = TreeOfThoughts(
     [strategy_a, strategy_b],
     max_depth=2,
     expand=lambda path, depth: generate_refinements(path),
+)(ws)
+```
+
+### Beam Search
+
+Keep the top-K branches alive at each depth level instead of just one
+winner. Interpolates between BestOfN (all parallel, one level) and
+TreeOfThoughts (one winner per level). At each level, all candidates
+across all beams are scored globally and only the top-K survive.
+
+Inspired by [EnCompass](https://arxiv.org/abs/2512.03571), which showed
+that multi-level beam search outperforms both BestOfN and single-winner
+tree search for hierarchical agent tasks.
+
+Use when the problem has hierarchical structure *and* you want to hedge
+across multiple promising directions: multi-step code migrations where
+several rewrite strategies look viable at each stage, planning tasks where
+pruning to one path too early loses good alternatives, or any setting where
+TreeOfThoughts' single-winner-per-level is too aggressive.
+
+```python
+from branching import BeamSearch
+
+def strategy_a(path: Path) -> tuple[bool, float]:
+    apply_approach_a(path)
+    return run_tests(path), evaluate_quality(path)
+
+def strategy_b(path: Path) -> tuple[bool, float]:
+    apply_approach_b(path)
+    return run_tests(path), evaluate_quality(path)
+
+outcome = BeamSearch(
+    [strategy_a, strategy_b, strategy_c, strategy_d],
+    expand=lambda path, depth: generate_refinements(path),
+    beam_width=2,
+    max_depth=3,
 )(ws)
 ```
 
@@ -313,6 +349,7 @@ All patterns: instantiate with config, call with a `Workspace`, get a
 | **`BestOfN`** | `(task, n=3, *, timeout=None)` | Run N copies; commit highest-scoring success |
 | **`Reflexion`** | `(task, max_retries=3, *, critique=None)` | Retry with critique feedback loop |
 | **`TreeOfThoughts`** | `(strategies, *, evaluate=None, expand=None, max_depth=1, timeout=None)` | Parallel strategy tree with optional depth expansion |
+| **`BeamSearch`** | `(strategies, *, expand, evaluate=None, beam_width=3, max_depth=2, timeout=None)` | Multi-level beam search; top-K branches survive each depth |
 | **`Tournament`** | `(task, n=4, *, judge, timeout=None)` | Generate N candidates; pairwise elimination picks winner |
 
 ### Result types
