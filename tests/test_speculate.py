@@ -8,7 +8,7 @@ import pytest
 from branching.core.base import FSBackend
 from branching.core.workspace import Workspace
 from branching.agent.speculate import Speculate
-from branching.agent.patterns import BestOfN, Reflexion, TreeOfThoughts, Tournament
+from branching.agent.patterns import BestOfN, Reflexion, TreeOfThoughts, BeamSearch, Tournament
 from branching.agent.result import SpeculationResult, SpeculationOutcome
 
 
@@ -379,6 +379,225 @@ class TestTreeOfThoughts:
         assert outcome.committed
         assert outcome.winner.branch_index == 1
         assert outcome.all_results[0].exception is not None
+
+
+class TestBeamSearch:
+    def test_single_level(self):
+        """beam_width >= N, all survive, best wins."""
+        ws = _make_workspace()
+
+        def strat_a(path):
+            return True, 0.3
+
+        def strat_b(path):
+            return True, 0.9
+
+        def strat_c(path):
+            return True, 0.6
+
+        outcome = BeamSearch(
+            [strat_a, strat_b, strat_c],
+            expand=lambda p, d: [],
+            beam_width=3,
+            max_depth=1,
+        )(ws)
+        assert outcome.committed
+        assert outcome.winner.branch_index == 1
+        assert outcome.winner.score == 0.9
+        assert len(outcome.all_results) == 3
+
+    def test_prunes_to_beam_width(self):
+        """N > K, verifies only K survive level 0."""
+        ws = _make_workspace()
+
+        def strat(path):
+            return True, 1.0
+
+        outcome = BeamSearch(
+            [strat, strat, strat, strat],
+            expand=lambda p, d: [],
+            beam_width=2,
+            max_depth=1,
+        )(ws)
+        assert outcome.committed
+        # 1 final commit + 2 aborted at level 0 + 1 aborted at final
+        # (2 survive level 0, 1 commits, 1 aborts at final)
+        assert len(MockFSBackend._commits) == 1
+        assert len(MockFSBackend._aborts) == 3
+
+    def test_multi_level_expand(self):
+        """2 levels, beams expand and best wins."""
+        ws = _make_workspace()
+        expand_calls = []
+
+        def strat_a(path):
+            return True, 0.8
+
+        def strat_b(path):
+            return True, 0.5
+
+        def strat_c(path):
+            return True, 0.3
+
+        def refine_x(path):
+            return True, 0.9
+
+        def refine_y(path):
+            return True, 0.7
+
+        def expand(path, depth):
+            expand_calls.append(depth)
+            return [refine_x, refine_y]
+
+        outcome = BeamSearch(
+            [strat_a, strat_b, strat_c],
+            expand=expand,
+            beam_width=2,
+            max_depth=2,
+        )(ws)
+        assert outcome.committed
+        # Level 0: strat_a (0.8) and strat_b (0.5) survive (top-2)
+        # Level 1: expand called for each surviving beam at depth=1
+        assert 1 in expand_calls
+        # Winner should have the highest sub-branch score
+        assert outcome.winner.score == 0.9
+
+    def test_beam_dies_mid_search(self):
+        """A beam's children all fail → beam is pruned."""
+        ws = _make_workspace()
+
+        def strat_a(path):
+            return True, 0.8
+
+        def strat_b(path):
+            return True, 0.5
+
+        call_count = [0]
+
+        def expand(path, depth):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First beam gets good children
+                return [lambda p: (True, 0.9)]
+            else:
+                # Second beam gets failing children
+                return [lambda p: (False, 0.0)]
+
+        outcome = BeamSearch(
+            [strat_a, strat_b],
+            expand=expand,
+            beam_width=2,
+            max_depth=2,
+        )(ws)
+        assert outcome.committed
+        # One beam should survive with score 0.9
+        assert outcome.winner.score == 0.9
+
+    def test_all_fail(self):
+        """No successes → committed=False."""
+        ws = _make_workspace()
+
+        def strat(path):
+            return False
+
+        outcome = BeamSearch(
+            [strat, strat, strat],
+            expand=lambda p, d: [],
+            beam_width=2,
+            max_depth=2,
+        )(ws)
+        assert not outcome.committed
+        assert outcome.winner is None
+        assert len(outcome.all_results) == 3
+
+    def test_commits_exactly_one(self):
+        """Only final winner committed to workspace."""
+        ws = _make_workspace()
+
+        def strat(path):
+            return True, 1.0
+
+        outcome = BeamSearch(
+            [strat, strat, strat],
+            expand=lambda p, d: [],
+            beam_width=2,
+            max_depth=1,
+        )(ws)
+        assert outcome.committed
+        # 1 beam commits to workspace, 2 beams aborted
+        assert len(MockFSBackend._commits) == 1
+        assert len(MockFSBackend._aborts) == 2
+
+    def test_runs_in_parallel(self):
+        """Verify candidates actually run concurrently."""
+        import time
+        ws = _make_workspace()
+        start = time.monotonic()
+
+        def strat(path):
+            time.sleep(0.2)
+            return True
+
+        outcome = BeamSearch(
+            [strat, strat, strat],
+            expand=lambda p, d: [],
+            beam_width=3,
+            max_depth=1,
+        )(ws)
+        elapsed = time.monotonic() - start
+        assert outcome.committed
+        # 3 tasks @ 0.2s; parallel ~0.2s, sequential ~0.6s
+        assert elapsed < 0.5
+
+    def test_evaluate_overrides_score(self):
+        """External evaluator overrides strategy scores."""
+        ws = _make_workspace()
+        eval_calls = []
+
+        def strat_a(path):
+            return True, 10.0  # strategy says 10
+
+        def strat_b(path):
+            return True, 1.0   # strategy says 1
+
+        def evaluate(path):
+            eval_calls.append(path)
+            return float(len(eval_calls))  # 1.0, 2.0, ...
+
+        outcome = BeamSearch(
+            [strat_a, strat_b],
+            expand=lambda p, d: [],
+            evaluate=evaluate,
+            beam_width=2,
+            max_depth=1,
+        )(ws)
+        assert outcome.committed
+        assert len(eval_calls) == 2
+
+    def test_single_depth_fallback(self):
+        """max_depth=1 behaves like scored BestOfN."""
+        ws = _make_workspace()
+
+        def strat_a(path):
+            return True, 0.3
+
+        def strat_b(path):
+            return True, 0.9
+
+        def strat_c(path):
+            return False, 0.0
+
+        outcome = BeamSearch(
+            [strat_a, strat_b, strat_c],
+            expand=lambda p, d: [],
+            beam_width=5,
+            max_depth=1,
+        )(ws)
+        assert outcome.committed
+        assert outcome.winner.branch_index == 1
+        assert outcome.winner.score == 0.9
+        # Failed strategy not committed
+        assert len(outcome.all_results) == 3
 
 
 class TestTournament:

@@ -420,6 +420,280 @@ class TreeOfThoughts:
         )
 
 
+class BeamSearch:
+    """Multi-level beam search: keep top-K branches alive at each depth.
+
+    Interpolates between BestOfN (all parallel, one level) and
+    TreeOfThoughts multi-level (one winner per level).  Multiple beams
+    survive each level, each accumulating its own state independently.
+    Pruning happens globally across all beams' candidates.
+
+    Strategies return ``bool`` or ``(bool, float)`` — if a bare bool,
+    the score defaults to 1.0 for success, 0.0 for failure.
+
+    Example:
+        outcome = BeamSearch(
+            [strat_a, strat_b, strat_c, strat_d],
+            expand=lambda path, depth: [refine_x, refine_y],
+            beam_width=2,
+            max_depth=3,
+        )(workspace)
+    """
+
+    def __init__(
+        self,
+        strategies: Sequence[Callable[[Path], bool | tuple[bool, float]]],
+        *,
+        expand: Callable[
+            [Path, int],
+            Sequence[Callable[[Path], bool | tuple[bool, float]]],
+        ],
+        evaluate: Callable[[Path], float] | None = None,
+        beam_width: int = 3,
+        max_depth: int = 2,
+        timeout: float | None = None,
+    ):
+        self._strategies = list(strategies)
+        self._expand = expand
+        self._evaluate = evaluate
+        self._beam_width = beam_width
+        self._max_depth = max_depth
+        self._timeout = timeout
+
+    def _score(self, ret, path):
+        """Parse strategy return and apply optional evaluator."""
+        if isinstance(ret, tuple):
+            success, score = ret
+        else:
+            success = bool(ret)
+            score = 1.0 if success else 0.0
+        if self._evaluate and success:
+            score = self._evaluate(path)
+        return bool(success), score
+
+    def _top_k(self, results, k):
+        """Return indices of top-k successful results by score."""
+        scored = [
+            (i, r) for i, r in enumerate(results)
+            if r is not None and r.success
+        ]
+        scored.sort(key=lambda x: x[1].score, reverse=True)
+        return [i for i, _ in scored[:k]]
+
+    def __call__(self, workspace: Workspace) -> SpeculationOutcome:
+        n = len(self._strategies)
+        if n == 0:
+            return SpeculationOutcome()
+
+        K = self._beam_width
+        all_results: list[SpeculationResult] = []
+
+        # -- Level 0: create beam branches from workspace ----------------
+        beam_branches: list[Optional[object]] = [None] * n
+        level0_results: list[Optional[SpeculationResult]] = [None] * n
+        task_done = [threading.Event() for _ in range(n)]
+        final_decision = [threading.Event() for _ in range(n)]
+        final_actions = ["abort"] * n
+
+        def _beam_worker(index: int) -> None:
+            result = SpeculationResult(branch_index=index, success=False)
+            try:
+                with workspace.branch(
+                    f"beam_{index}", on_success=None, on_error=None
+                ) as b:
+                    result.branch_path = b.path
+                    beam_branches[index] = b
+                    try:
+                        ret = self._strategies[index](b.path)
+                        result.success, result.score = self._score(
+                            ret, b.path
+                        )
+                        result.return_value = ret
+                    except Exception as e:
+                        result.exception = e
+
+                    level0_results[index] = result
+                    task_done[index].set()
+
+                    # Hold branch open until final decision
+                    final_decision[index].wait()
+                    if final_actions[index] == "commit":
+                        b.commit()
+                    else:
+                        b.abort()
+            except Exception as e:
+                result.exception = e
+                level0_results[index] = result
+                task_done[index].set()
+
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            futures = [pool.submit(_beam_worker, i) for i in range(n)]
+
+            deadline = (
+                time.monotonic() + self._timeout
+                if self._timeout is not None
+                else None
+            )
+            for ev in task_done:
+                remaining = (
+                    max(0, deadline - time.monotonic())
+                    if deadline is not None
+                    else None
+                )
+                ev.wait(timeout=remaining)
+
+            # Select top-K beams
+            survivors = set(self._top_k(level0_results, K))
+
+            beam_scores: dict[int, float] = {}
+            for i in survivors:
+                beam_scores[i] = level0_results[i].score
+
+            all_results.extend(
+                r if r is not None
+                else SpeculationResult(branch_index=i, success=False)
+                for i, r in enumerate(level0_results)
+            )
+
+            # Abort non-survivors immediately
+            for i in range(n):
+                if i not in survivors:
+                    final_actions[i] = "abort"
+                    final_decision[i].set()
+
+            # -- Deeper levels -------------------------------------------
+            for depth in range(1, self._max_depth):
+                if not survivors:
+                    break
+
+                sub_tasks: list[tuple[int, int, Callable]] = []
+                for beam_idx in sorted(survivors):
+                    sub_strats = list(
+                        self._expand(beam_branches[beam_idx].path, depth)
+                    )
+                    for si, strat in enumerate(sub_strats):
+                        sub_tasks.append((beam_idx, si, strat))
+
+                if not sub_tasks:
+                    break
+
+                m = len(sub_tasks)
+                sub_results: list[Optional[SpeculationResult]] = [None] * m
+                sub_done = [threading.Event() for _ in range(m)]
+                sub_decision_ready = [threading.Event() for _ in range(m)]
+                sub_decisions = ["abort"] * m
+                _depth = depth  # capture value for closure
+
+                def _sub_worker(idx: int, _d: int = _depth) -> None:
+                    beam_idx, strat_idx, strategy = sub_tasks[idx]
+                    result = SpeculationResult(
+                        branch_index=idx, success=False
+                    )
+                    try:
+                        parent = beam_branches[beam_idx]
+                        with parent.branch(
+                            f"beam_{beam_idx}_d{_d}_{strat_idx}",
+                            on_success=None,
+                            on_error=None,
+                        ) as sb:
+                            result.branch_path = sb.path
+                            try:
+                                ret = strategy(sb.path)
+                                result.success, result.score = self._score(
+                                    ret, sb.path
+                                )
+                                result.return_value = ret
+                            except Exception as e:
+                                result.exception = e
+
+                            sub_results[idx] = result
+                            sub_done[idx].set()
+                            sub_decision_ready[idx].wait()
+
+                            if sub_decisions[idx] == "commit":
+                                sb.commit()
+                            else:
+                                sb.abort()
+                    except Exception as e:
+                        result.exception = e
+                        sub_results[idx] = result
+                        sub_done[idx].set()
+
+                with ThreadPoolExecutor(max_workers=m) as sub_pool:
+                    sub_futures = [
+                        sub_pool.submit(_sub_worker, i) for i in range(m)
+                    ]
+
+                    for ev in sub_done:
+                        remaining = (
+                            max(0, deadline - time.monotonic())
+                            if deadline is not None
+                            else None
+                        )
+                        ev.wait(timeout=remaining)
+
+                    top_k_indices = set(self._top_k(sub_results, K))
+
+                    all_results.extend(
+                        r if r is not None
+                        else SpeculationResult(branch_index=i, success=False)
+                        for i, r in enumerate(sub_results)
+                    )
+
+                    for i in top_k_indices:
+                        sub_decisions[i] = "commit"
+                    for ev in sub_decision_ready:
+                        ev.set()
+                    for f in sub_futures:
+                        f.result()
+
+                # Update surviving beams
+                beams_alive: dict[int, float] = {}
+                for i in top_k_indices:
+                    beam_idx = sub_tasks[i][0]
+                    score = sub_results[i].score
+                    if (
+                        beam_idx not in beams_alive
+                        or score > beams_alive[beam_idx]
+                    ):
+                        beams_alive[beam_idx] = score
+
+                for beam_idx in survivors - set(beams_alive):
+                    final_actions[beam_idx] = "abort"
+                    final_decision[beam_idx].set()
+
+                survivors = set(beams_alive)
+                beam_scores.update(beams_alive)
+
+            # -- Final: pick best surviving beam -------------------------
+            winner = None
+            if survivors:
+                best = max(survivors, key=lambda i: beam_scores[i])
+                final_actions[best] = "commit"
+                winner = SpeculationResult(
+                    branch_index=best,
+                    success=True,
+                    score=beam_scores[best],
+                    branch_path=(
+                        level0_results[best].branch_path
+                        if level0_results[best] is not None
+                        else None
+                    ),
+                )
+
+            # Release all remaining beam threads
+            for i in range(n):
+                final_decision[i].set()
+            for f in futures:
+                f.result()
+
+        return SpeculationOutcome(
+            winner=winner,
+            all_results=all_results,
+            committed=winner is not None,
+        )
+
+
 class Tournament:
     """Pairwise elimination bracket: generate N candidates, compare
     pairwise via a judge function, commit the final winner.
