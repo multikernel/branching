@@ -8,7 +8,7 @@ import pytest
 from branching.core.base import FSBackend
 from branching.core.workspace import Workspace
 from branching.agent.speculate import Speculate
-from branching.agent.patterns import BestOfN, Reflexion, TreeOfThoughts
+from branching.agent.patterns import BestOfN, Reflexion, TreeOfThoughts, Tournament
 from branching.agent.result import SpeculationResult, SpeculationOutcome
 
 
@@ -379,6 +379,123 @@ class TestTreeOfThoughts:
         assert outcome.committed
         assert outcome.winner.branch_index == 1
         assert outcome.all_results[0].exception is not None
+
+
+class TestTournament:
+    def test_basic_bracket(self):
+        """4 candidates, judge always picks second → candidate 3 wins."""
+        ws = _make_workspace()
+
+        def task(path: Path, index: int) -> bool:
+            return True
+
+        def judge(path_a: Path, path_b: Path) -> int:
+            return 1  # always pick b
+
+        outcome = Tournament(task, n=4, judge=judge)(ws)
+        assert outcome.committed
+        assert outcome.winner is not None
+        # Bracket: (0v1→1), (2v3→3), (1v3→3)
+        assert outcome.winner.branch_index == 3
+        assert len(outcome.all_results) == 4
+
+    def test_all_fail(self):
+        """No survivors means nothing committed."""
+        ws = _make_workspace()
+
+        def task(path: Path, index: int) -> bool:
+            return False
+
+        def judge(path_a, path_b):
+            raise AssertionError("judge should not be called")
+
+        outcome = Tournament(task, n=3, judge=judge)(ws)
+        assert not outcome.committed
+        assert outcome.winner is None
+        assert len(outcome.all_results) == 3
+
+    def test_single_survivor(self):
+        """Only 1 succeeds → auto-wins without judge call."""
+        ws = _make_workspace()
+        judge_calls = []
+
+        def task(path: Path, index: int) -> bool:
+            return index == 2
+
+        def judge(path_a, path_b):
+            judge_calls.append(1)
+            return 0
+
+        outcome = Tournament(task, n=4, judge=judge)(ws)
+        assert outcome.committed
+        assert outcome.winner.branch_index == 2
+        assert len(judge_calls) == 0
+
+    def test_odd_candidates(self):
+        """3 candidates: one gets a bye in round 1."""
+        ws = _make_workspace()
+
+        def task(path: Path, index: int) -> bool:
+            return True
+
+        def judge(path_a: Path, path_b: Path) -> int:
+            return 0  # always pick a
+
+        outcome = Tournament(task, n=3, judge=judge)(ws)
+        assert outcome.committed
+        # Bracket: (0v1→0), bye 2, then (0v2→0)
+        assert outcome.winner.branch_index == 0
+
+    def test_commits_exactly_one(self):
+        """Only the winner should be committed; all others aborted."""
+        ws = _make_workspace()
+
+        def task(path: Path, index: int) -> bool:
+            return True
+
+        def judge(path_a, path_b):
+            return 0
+
+        outcome = Tournament(task, n=4, judge=judge)(ws)
+        assert outcome.committed
+        assert len(MockFSBackend._commits) == 1
+        assert len(MockFSBackend._aborts) == 3
+
+    def test_runs_in_parallel(self):
+        """Verify candidates actually run concurrently."""
+        import time
+        ws = _make_workspace()
+        start = time.monotonic()
+
+        def task(path: Path, index: int) -> bool:
+            time.sleep(0.2)
+            return True
+
+        def judge(path_a, path_b):
+            return 0
+
+        outcome = Tournament(task, n=3, judge=judge)(ws)
+        elapsed = time.monotonic() - start
+        assert outcome.committed
+        # 3 tasks @ 0.2s each; parallel ~0.2s, sequential ~0.6s
+        assert elapsed < 0.5
+
+    def test_exception_in_candidate(self):
+        """Exception in one candidate → eliminated, others proceed."""
+        ws = _make_workspace()
+
+        def task(path: Path, index: int) -> bool:
+            if index == 0:
+                raise RuntimeError("boom")
+            return True
+
+        def judge(path_a, path_b):
+            return 0
+
+        outcome = Tournament(task, n=3, judge=judge)(ws)
+        assert outcome.committed
+        assert outcome.all_results[0].exception is not None
+        assert outcome.winner.branch_index != 0
 
 
 class TestSpeculationResult:

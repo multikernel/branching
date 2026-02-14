@@ -39,7 +39,7 @@ raises, everything is rolled back - the workspace is untouched.
 
 ## Agent patterns
 
-BranchContext ships with four high-level patterns that cover the most common
+BranchContext ships with five high-level patterns that cover the most common
 agent workflows. Each is a callable class: instantiate with config, call with
 a workspace.
 
@@ -140,6 +140,30 @@ outcome = TreeOfThoughts(
     max_depth=2,
     expand=lambda path, depth: generate_refinements(path),
 )(ws)
+```
+
+### Tournament (pairwise elimination)
+
+Generate N candidates in parallel, then narrow to one through pairwise
+elimination via a judge function. The convergent dual of Tree of Thoughts:
+starts wide, narrows to one.
+
+Use when you have a reliable pairwise comparator but no absolute scoring
+function: patch selection where an LLM judge picks the better diff,
+A/B-style evaluation where candidates are compared head-to-head, or
+any setting where relative ranking is easier than absolute scoring.
+
+```python
+from branching import Tournament
+
+def generate_patch(path: Path, index: int) -> bool:
+    return run_agent(workdir=path, seed=index)
+
+def judge(path_a: Path, path_b: Path) -> int:
+    # 0 = a wins, 1 = b wins
+    return llm_compare(path_a / "diff.patch", path_b / "diff.patch")
+
+outcome = Tournament(generate_patch, n=8, judge=judge)(ws)
 ```
 
 ## Lower-level usage
@@ -289,6 +313,7 @@ All patterns: instantiate with config, call with a `Workspace`, get a
 | **`BestOfN`** | `(task, n=3, *, timeout=None)` | Run N copies; commit highest-scoring success |
 | **`Reflexion`** | `(task, max_retries=3, *, critique=None)` | Retry with critique feedback loop |
 | **`TreeOfThoughts`** | `(strategies, *, evaluate=None, expand=None, max_depth=1, timeout=None)` | Parallel strategy tree with optional depth expansion |
+| **`Tournament`** | `(task, n=4, *, judge, timeout=None)` | Generate N candidates; pairwise elimination picks winner |
 
 ### Result types
 

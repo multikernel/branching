@@ -418,3 +418,150 @@ class TreeOfThoughts:
             all_results=all_results,
             committed=True,
         )
+
+
+class Tournament:
+    """Pairwise elimination bracket: generate N candidates, compare
+    pairwise via a judge function, commit the final winner.
+
+    The convergent dual of TreeOfThoughts: starts wide, narrows to one.
+
+    Example:
+        outcome = Tournament(task, n=4, judge=judge)(ws)
+        # Commits the bracket winner
+    """
+
+    def __init__(
+        self,
+        task: Callable[[Path, int], bool],
+        n: int = 4,
+        *,
+        judge: Callable[[Path, Path], int],
+        timeout: float | None = None,
+    ):
+        """
+        Args:
+            task: Callable(branch_path, candidate_index) → success.
+                  Produces output in the branch directory.
+            n: Number of candidates to generate.
+            judge: Callable(path_a, path_b) → 0 (a wins) or 1 (b wins).
+                   Compares two candidates' branches during elimination.
+            timeout: Overall timeout in seconds.
+        """
+        self._task = task
+        self._n = n
+        self._judge = judge
+        self._timeout = timeout
+
+    @staticmethod
+    def _run_bracket(
+        survivors: list[int],
+        branch_paths: list[Path],
+        judge: Callable[[Path, Path], int],
+    ) -> int:
+        """Single-elimination bracket. Returns the winning candidate index."""
+        while len(survivors) > 1:
+            next_round: list[int] = []
+            i = 0
+            while i < len(survivors) - 1:
+                a, b = survivors[i], survivors[i + 1]
+                pick = judge(branch_paths[a], branch_paths[b])
+                next_round.append(b if pick else a)
+                i += 2
+            # Odd candidate gets a bye
+            if len(survivors) % 2 == 1:
+                next_round.append(survivors[-1])
+            survivors = next_round
+        return survivors[0]
+
+    def __call__(self, workspace: Workspace) -> SpeculationOutcome:
+        n = self._n
+        results: list[Optional[SpeculationResult]] = [None] * n
+        branch_paths: list[Optional[Path]] = [None] * n
+        task_done = [threading.Event() for _ in range(n)]
+        decision_ready = [threading.Event() for _ in range(n)]
+        decisions = ["abort"] * n
+
+        def _run_candidate(index: int) -> None:
+            result = SpeculationResult(branch_index=index, success=False)
+            try:
+                with workspace.branch(
+                    f"tournament_{index}", on_success=None, on_error=None
+                ) as b:
+                    result.branch_path = b.path
+                    branch_paths[index] = b.path
+                    try:
+                        success = self._task(b.path, index)
+                        result.success = bool(success)
+                        result.return_value = success
+                    except Exception as e:
+                        result.exception = e
+
+                    results[index] = result
+                    task_done[index].set()
+
+                    decision_ready[index].wait()
+
+                    if decisions[index] == "commit":
+                        b.commit()
+                    else:
+                        b.abort()
+
+            except Exception as e:
+                result.exception = e
+                results[index] = result
+                task_done[index].set()
+
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            futures = [pool.submit(_run_candidate, i) for i in range(n)]
+
+            # Wait for all tasks to finish
+            deadline = (
+                time.monotonic() + self._timeout
+                if self._timeout is not None
+                else None
+            )
+            for ev in task_done:
+                remaining = (
+                    max(0, deadline - time.monotonic())
+                    if deadline is not None
+                    else None
+                )
+                ev.wait(timeout=remaining)
+
+            # Filter to successful survivors
+            survivors = [
+                i for i, r in enumerate(results)
+                if r is not None and r.success
+            ]
+
+            winner_idx: Optional[int] = None
+            if len(survivors) == 1:
+                winner_idx = survivors[0]
+            elif len(survivors) > 1:
+                winner_idx = self._run_bracket(
+                    survivors, branch_paths, self._judge
+                )
+
+            if winner_idx is not None:
+                decisions[winner_idx] = "commit"
+
+            # Release all threads
+            for ev in decision_ready:
+                ev.set()
+
+            for f in futures:
+                f.result()
+
+        committed = winner_idx is not None
+        winner = results[winner_idx] if winner_idx is not None else None
+        all_results = [
+            r if r is not None else SpeculationResult(branch_index=i, success=False)
+            for i, r in enumerate(results)
+        ]
+
+        return SpeculationOutcome(
+            winner=winner,
+            all_results=all_results,
+            committed=committed,
+        )

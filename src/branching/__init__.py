@@ -50,6 +50,7 @@ __all__ = [
     "BestOfN",
     "Reflexion",
     "TreeOfThoughts",
+    "Tournament",
     # Results
     "SpeculationResult",
     "SpeculationOutcome",
@@ -82,6 +83,7 @@ _LAZY_IMPORTS = {
     "BestOfN": ".agent.patterns",
     "Reflexion": ".agent.patterns",
     "TreeOfThoughts": ".agent.patterns",
+    "Tournament": ".agent.patterns",
     # Results
     "SpeculationResult": ".agent.result",
     "SpeculationOutcome": ".agent.result",
