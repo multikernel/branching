@@ -21,6 +21,8 @@ def run_in_process(
     *,
     limits: ResourceLimits | None = None,
     timeout: float | None = None,
+    parent_cgroup: Path | None = None,
+    scope_callback: Callable[[Path], None] | None = None,
 ) -> Any:
     """Run *fn(*args)* in a forked child process, optionally with cgroup limits.
 
@@ -34,6 +36,10 @@ def run_in_process(
             BranchContext workspace).
         limits: Optional resource limits applied to the child's cgroup.
         timeout: Maximum seconds to wait for the child.
+        parent_cgroup: Optional parent cgroup for hierarchical nesting.
+        scope_callback: Optional callback invoked with the cgroup scope path
+            after the child's scope is created.  Allows callers to track live
+            cgroup paths for external kill/throttle.
 
     Returns:
         Whatever *fn* returned.
@@ -61,7 +67,12 @@ def run_in_process(
                 pass
             raise
 
-    with BranchContext(_target, workspace=workspace, limits=limits) as ctx:
+    with BranchContext(
+        _target, workspace=workspace, limits=limits,
+        parent_cgroup=parent_cgroup,
+    ) as ctx:
+        if scope_callback is not None and ctx.cgroup_scope is not None:
+            scope_callback(ctx.cgroup_scope)
         try:
             ctx.wait(timeout=timeout)
         except ProcessBranchError:

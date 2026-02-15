@@ -37,6 +37,7 @@ class Speculate:
         isolate_processes: bool = False,
         timeout: float | None = None,
         resource_limits: ResourceLimits | None = None,
+        group_limits: ResourceLimits | None = None,
     ):
         """
         Args:
@@ -49,6 +50,8 @@ class Speculate:
             timeout: Overall timeout in seconds for all candidates.
             resource_limits: Optional per-branch resource limits (implies
                 process isolation).
+            group_limits: Optional resource limits applied to the root
+                cgroup that contains all branches.
         """
         self._candidates = list(candidates)
         self._first_wins = first_wins
@@ -56,12 +59,46 @@ class Speculate:
         self._isolate_processes = isolate_processes
         self._timeout = timeout
         self._resource_limits = resource_limits
+        self._group_limits = group_limits
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
+        import os as _os
+
+        root_cgroup: Optional[Path] = None
+        if self._resource_limits is not None and self._group_limits is not None:
+            try:
+                from ..process._cgroup import create_group
+                root_cgroup = create_group(
+                    f"speculate-{_os.getpid()}",
+                    limits=self._group_limits,
+                )
+            except OSError:
+                root_cgroup = None
+
+        try:
+            return self._run(workspace, root_cgroup)
+        finally:
+            if root_cgroup is not None:
+                from ..process._cgroup import kill_scope
+                kill_scope(root_cgroup)
+
+    def _run(self, workspace: Workspace, root_cgroup: Optional[Path]) -> SpeculationOutcome:
         results: list[SpeculationResult] = [None] * len(self._candidates)  # type: ignore
         winner: Optional[SpeculationResult] = None
         committed = False
         cancel_event = threading.Event()
+
+        # Track live cgroup scope paths so we can kill losers immediately.
+        # Populated by scope_callback from run_in_process; read by
+        # _kill_scopes.  dict ops are GIL-protected in CPython.
+        branch_scopes: dict[int, Path] = {}
+
+        def _kill_scopes(exclude: int = -1) -> None:
+            """Kill all tracked cgroup scopes except *exclude*."""
+            from ..process._cgroup import kill_scope
+            for idx, scope in list(branch_scopes.items()):
+                if idx != exclude:
+                    kill_scope(scope)
 
         def _run_candidate(index: int) -> SpeculationResult:
             branch_name = f"speculate_{index}"
@@ -81,7 +118,13 @@ class Speculate:
                         return result
 
                     if self._resource_limits is not None:
-                        success = self._run_with_limits(b.path, index)
+                        def _on_scope(scope_path: Path, _i: int = index) -> None:
+                            branch_scopes[_i] = scope_path
+
+                        success = self._run_with_limits(
+                            b.path, index, root_cgroup,
+                            scope_callback=_on_scope,
+                        )
                     elif self._isolate_processes:
                         success = self._run_in_process(b.path, index)
                     else:
@@ -93,6 +136,7 @@ class Speculate:
                     if result.success and not cancel_event.is_set():
                         if self._first_wins:
                             cancel_event.set()
+                            _kill_scopes(index)
                         try:
                             b.commit()
                         except ConflictError:
@@ -131,6 +175,7 @@ class Speculate:
             except TimeoutError:
                 # Signal remaining candidates to abort
                 cancel_event.set()
+                _kill_scopes()
 
             # Wait briefly for in-flight branches to finish cleanup
             for f in futures:
@@ -173,7 +218,10 @@ class Speculate:
             except ProcessBranchError:
                 return False
 
-    def _run_with_limits(self, path: Path, index: int) -> bool:
+    def _run_with_limits(
+        self, path: Path, index: int, parent_cgroup: Path | None = None,
+        scope_callback=None,
+    ) -> bool:
         """Run a candidate in a forked child with resource limits."""
         from ..process.runner import run_in_process
         from ..exceptions import ProcessBranchError
@@ -191,6 +239,8 @@ class Speculate:
                 workspace=path,
                 limits=self._resource_limits,
                 timeout=per_candidate,
+                parent_cgroup=parent_cgroup,
+                scope_callback=scope_callback,
             )
             return bool(result)
         except ProcessBranchError:

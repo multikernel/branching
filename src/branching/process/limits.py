@@ -52,3 +52,17 @@ class ResourceLimits:
 
     cpu: float | None = None
     """Fraction of one CPU (0.5 = 50%).  Written to ``cpu.max``."""
+
+    memory_high: int | None = None
+    """Soft memory throttle in bytes (written to ``memory.high``).
+
+    When usage exceeds this value the kernel reclaims aggressively but
+    does *not* OOM-kill the process.
+    """
+
+    oom_group: bool = False
+    """Atomic OOM termination (written to ``memory.oom.group``).
+
+    When ``True``, all processes in the cgroup are killed together on
+    OOM rather than picking a single victim.
+    """

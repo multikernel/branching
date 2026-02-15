@@ -42,6 +42,7 @@ class BranchContext:
         isolate: bool = False,
         close_fds: bool = False,
         limits: ResourceLimits | None = None,
+        parent_cgroup: Path | None = None,
     ):
         """
         Args:
@@ -52,12 +53,16 @@ class BranchContext:
                      since each child needs its own user ns for bind-mount).
             close_fds: BR_CLOSE_FDS — close inherited fds (3+) in child.
             limits: Optional resource limits applied via cgroup v2.
+            parent_cgroup: Optional parent cgroup directory.  When given,
+                the child's scope is created under this directory instead
+                of the process's own cgroup, enabling hierarchical nesting.
         """
         self._target = target
         self._workspace = workspace
         self._isolate = isolate
         self._close_fds = close_fds
         self._limits = limits
+        self._parent_cgroup = parent_cgroup
         self._pid: Optional[int] = None
         self._exited = False
         self._cgroup_scope: Optional[Path] = None
@@ -67,6 +72,11 @@ class BranchContext:
         if self._pid is None:
             raise ProcessBranchError("Process not started")
         return self._pid
+
+    @property
+    def cgroup_scope(self) -> Optional[Path]:
+        """The cgroup v2 scope directory, or ``None`` if unavailable."""
+        return self._cgroup_scope
 
     @property
     def alive(self) -> bool:
@@ -175,7 +185,9 @@ class BranchContext:
         # (required for per-branch limits).
         scope_name = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
         try:
-            self._cgroup_scope = _cgroup.create_scope(scope_name)
+            self._cgroup_scope = _cgroup.create_scope(
+                scope_name, parent=self._parent_cgroup,
+            )
         except OSError:
             self._cgroup_scope = None
 
@@ -253,6 +265,7 @@ class BranchContext:
         isolate: bool = False,
         close_fds: bool = False,
         limits: ResourceLimits | None = None,
+        parent_cgroup: Path | None = None,
     ) -> Iterator[list["BranchContext"]]:
         """Create N branch contexts, mirroring branch(BR_CREATE, n_branches=N).
 
@@ -264,6 +277,7 @@ class BranchContext:
             isolate: BR_ISOLATE — separate user ns per child.
             close_fds: BR_CLOSE_FDS — close inherited fds in children.
             limits: Optional resource limits applied via cgroup v2.
+            parent_cgroup: Optional parent cgroup for hierarchical nesting.
 
         Yields:
             List of entered BranchContext instances (already forked).
@@ -276,7 +290,7 @@ class BranchContext:
             for target, workspace in zip(targets, workspaces):
                 ctx = BranchContext(
                     target, workspace, isolate=isolate, close_fds=close_fds,
-                    limits=limits,
+                    limits=limits, parent_cgroup=parent_cgroup,
                 )
                 ctx.__enter__()
                 contexts.append(ctx)

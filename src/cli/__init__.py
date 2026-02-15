@@ -83,7 +83,7 @@ def _print_error(message: str, args: argparse.Namespace) -> None:
 
 
 def _add_resource_limit_args(parser: argparse.ArgumentParser) -> None:
-    """Add --memory-limit and --cpu-limit flags to a subparser."""
+    """Add per-branch resource limit flags to a subparser."""
     parser.add_argument(
         "--memory-limit",
         default=None,
@@ -97,12 +97,55 @@ def _add_resource_limit_args(parser: argparse.ArgumentParser) -> None:
         metavar="FRAC",
         help="Per-branch CPU limit as fraction of 1 CPU (e.g. 0.5 = 50%%). Implies process isolation.",
     )
+    parser.add_argument(
+        "--memory-high",
+        default=None,
+        metavar="SIZE",
+        help="Per-branch soft memory throttle (memory.high). Reclaims aggressively but no OOM kill.",
+    )
+    parser.add_argument(
+        "--oom-group",
+        action="store_true",
+        default=False,
+        help="Enable atomic OOM termination (memory.oom.group). Kills entire branch on OOM.",
+    )
+
+
+def _add_group_limit_args(parser: argparse.ArgumentParser) -> None:
+    """Add group-level resource limit flags to a subparser."""
+    parser.add_argument(
+        "--group-memory-limit",
+        default=None,
+        metavar="SIZE",
+        help="Total memory budget for all branches (group cgroup memory.max).",
+    )
+    parser.add_argument(
+        "--group-cpu-limit",
+        type=float,
+        default=None,
+        metavar="FRAC",
+        help="Total CPU budget for all branches (group cgroup cpu.max).",
+    )
 
 
 def _parse_resource_limits(args: argparse.Namespace):
-    """Parse --memory-limit / --cpu-limit into a ResourceLimits or None."""
+    """Parse per-branch resource limit flags into a ResourceLimits or None."""
     mem_str = getattr(args, "memory_limit", None)
     cpu_val = getattr(args, "cpu_limit", None)
+    mem_high_str = getattr(args, "memory_high", None)
+    oom_group = getattr(args, "oom_group", False)
+    if mem_str is None and cpu_val is None and mem_high_str is None and not oom_group:
+        return None
+    from branching.process.limits import ResourceLimits, parse_memory_size
+    memory = parse_memory_size(mem_str) if mem_str is not None else None
+    memory_high = parse_memory_size(mem_high_str) if mem_high_str is not None else None
+    return ResourceLimits(memory=memory, cpu=cpu_val, memory_high=memory_high, oom_group=oom_group)
+
+
+def _parse_group_limits(args: argparse.Namespace):
+    """Parse group-level resource limit flags into a ResourceLimits or None."""
+    mem_str = getattr(args, "group_memory_limit", None)
+    cpu_val = getattr(args, "group_cpu_limit", None)
     if mem_str is None and cpu_val is None:
         return None
     from branching.process.limits import ResourceLimits, parse_memory_size
@@ -161,6 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_spec.add_argument("--timeout", type=float, default=None, help="Timeout in seconds")
     p_spec.add_argument("--json", action="store_true", help="JSON output")
     _add_resource_limit_args(p_spec)
+    _add_group_limit_args(p_spec)
 
     # --- best-of-n ---
     p_bon = sub.add_parser(
@@ -173,6 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_bon.add_argument("--timeout", type=float, default=None, help="Timeout in seconds")
     p_bon.add_argument("--json", action="store_true", help="JSON output")
     _add_resource_limit_args(p_bon)
+    _add_group_limit_args(p_bon)
     p_bon.add_argument("cmd", nargs=argparse.REMAINDER, metavar="CMD",
                         help="Command to run (after --)")
 
@@ -188,6 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Shell command to generate feedback after failure")
     p_refl.add_argument("--json", action="store_true", help="JSON output")
     _add_resource_limit_args(p_refl)
+    _add_group_limit_args(p_refl)
     p_refl.add_argument("cmd", nargs=argparse.REMAINDER, metavar="CMD",
                          help="Command to run (after --)")
 

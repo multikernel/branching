@@ -6,7 +6,7 @@ from pathlib import Path
 
 from branching import Speculate, Workspace
 
-from . import _parse_resource_limits, _print_error, _print_result, _resolve_workspace
+from . import _parse_group_limits, _parse_resource_limits, _print_error, _print_result, _resolve_workspace
 
 
 def _make_candidate(cmd_str: str):
@@ -25,9 +25,10 @@ def cmd_speculate(args) -> int:
 
     candidates = [_make_candidate(c) for c in args.candidates]
     limits = _parse_resource_limits(args)
+    group_limits = _parse_group_limits(args)
     spec = Speculate(
         candidates, first_wins=True, timeout=args.timeout,
-        resource_limits=limits,
+        resource_limits=limits, group_limits=group_limits,
     )
     outcome = spec(ws)
 
