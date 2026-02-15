@@ -268,6 +268,36 @@ Any agent pattern can also opt into process isolation:
 outcome = Speculate(candidates, isolate_processes=True, timeout=60)(ws)
 ```
 
+### Resource limits
+
+Constrain per-branch memory and CPU via cgroup v2. Passing
+`resource_limits` to any pattern automatically enables process isolation -
+each branch runs in a forked child with cgroup enforcement.
+
+```python
+from branching import ResourceLimits, BestOfN
+
+limits = ResourceLimits(memory=512 * 1024 * 1024, cpu=0.5)  # 512 MB, 50% CPU
+
+outcome = BestOfN(scored_task, n=5, resource_limits=limits)(ws)
+```
+
+All patterns accept `resource_limits`: `Speculate`, `BestOfN`, `Reflexion`,
+`TreeOfThoughts`, `BeamSearch`, and `Tournament`. Fields default to `None`
+(unlimited). A `ResourceLimits()` with all `None` fields triggers process
+isolation without applying any limits.
+
+You can also pass limits directly to `BranchContext`:
+
+```python
+from branching import BranchContext, ResourceLimits
+
+limits = ResourceLimits(memory=1024 * 1024 * 1024)  # 1 GB
+
+with BranchContext(run_agent, workspace=branch.path, limits=limits) as ctx:
+    ctx.wait(timeout=30)
+```
+
 ## CLI
 
 The `branching` command exposes the agent patterns as shell commands.
@@ -282,6 +312,8 @@ Run a command in a new branch. Commits on exit 0, aborts on non-zero.
 branching run -- ./build.sh
 branching run --on-error none -- python train.py
 branching run --ask -- make test          # prompt before commit/abort
+branching run --memory-limit 512M -- ./agent.sh   # cap memory at 512 MB
+branching run --memory-limit 1G --cpu-limit 0.5 -- python train.py
 ```
 
 ### speculate
@@ -291,6 +323,7 @@ Race N commands in parallel branches. First success wins.
 ```bash
 branching speculate -c "./fix_a.sh" -c "./fix_b.sh" -c "./fix_c.sh"
 branching speculate --timeout 60 -c "python solve_v1.py" -c "python solve_v2.py"
+branching speculate --memory-limit 256M -c "./a.sh" -c "./b.sh"
 ```
 
 ### best-of-n
@@ -305,6 +338,7 @@ Each child receives `BRANCHING_ATTEMPT` (0-indexed) in its environment.
 branching best-of-n -n 5 -- ./solve.py
 branching best-of-n -n 3 --timeout 120 --json -- python attempt.py
 branching best-of-n -n 3 -- bash -c 'python run.py && echo "$SCORE" >&3'
+branching best-of-n -n 5 --memory-limit 1G --cpu-limit 0.5 -- python attempt.py
 ```
 
 ### reflexion
@@ -318,6 +352,7 @@ The child receives `BRANCHING_ATTEMPT` (0-indexed) and `BRANCHING_FEEDBACK`
 branching reflexion --retries 5 -- ./fix.sh
 branching reflexion --retries 3 --critique "./review.sh" -- ./solve.py
 branching reflexion --retries 3 --critique "python critique.py" --json -- python agent.py
+branching reflexion --retries 3 --memory-limit 512M -- ./fix.sh
 ```
 
 ### status
@@ -346,4 +381,10 @@ detected automatically.
 Process isolation (`BranchContext`) uses unprivileged Linux user namespaces
 to give each child its own filesystem view. No root required - works on any
 Linux distribution with `unprivileged_userns_clone=1` (the default).
+
+Resource limits (`ResourceLimits`) use cgroup v2 to enforce per-branch
+memory and CPU constraints. Each branch gets its own cgroup scope with
+limits applied before the child process starts. Requires cgroup v2 with
+the memory and cpu controllers enabled (the default on modern systemd
+distributions).
 
