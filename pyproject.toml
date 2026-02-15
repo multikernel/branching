@@ -9,6 +9,9 @@ description = "Unified branching for speculative execution: filesystem, process,
 requires-python = ">=3.10"
 license = "Apache-2.0"
 
+[project.scripts]
+branching = "cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
