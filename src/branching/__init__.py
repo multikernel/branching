@@ -45,6 +45,7 @@ __all__ = [
     "Branch",
     # Process
     "BranchContext",
+    "ResourceLimits",
     # Agent patterns
     "Speculate",
     "BestOfN",
@@ -79,6 +80,7 @@ _LAZY_IMPORTS = {
     "Branch": ".core.branch",
     # Process layer
     "BranchContext": ".process.context",
+    "ResourceLimits": ".process.limits",
     # Agent layer
     "Speculate": ".agent.speculate",
     "BestOfN": ".agent.patterns",

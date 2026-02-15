@@ -5,17 +5,23 @@ Each child runs in its own user + mount namespace with the branch
 workspace bind-mounted. Isolation failures raise, not silently degrade.
 """
 
+from __future__ import annotations
+
 import contextlib
 import os
 import signal
 import tempfile
 import time
+import uuid
 from pathlib import Path
-from typing import Callable, Iterator, Optional, Sequence
+from typing import Callable, Iterator, Optional, Sequence, TYPE_CHECKING
 
 from ..exceptions import ForkError, ProcessBranchError
 from . import _cgroup
 from ._namespace import setup_user_ns, bind_mount
+
+if TYPE_CHECKING:
+    from .limits import ResourceLimits
 
 
 class BranchContext:
@@ -35,6 +41,7 @@ class BranchContext:
         *,
         isolate: bool = False,
         close_fds: bool = False,
+        limits: ResourceLimits | None = None,
     ):
         """
         Args:
@@ -44,11 +51,13 @@ class BranchContext:
             isolate: BR_ISOLATE — separate user ns per child (always-on
                      since each child needs its own user ns for bind-mount).
             close_fds: BR_CLOSE_FDS — close inherited fds (3+) in child.
+            limits: Optional resource limits applied via cgroup v2.
         """
         self._target = target
         self._workspace = workspace
         self._isolate = isolate
         self._close_fds = close_fds
+        self._limits = limits
         self._pid: Optional[int] = None
         self._exited = False
         self._cgroup_scope: Optional[Path] = None
@@ -162,10 +171,18 @@ class BranchContext:
 
     def __enter__(self) -> "BranchContext":
         # Create cgroup scope (best-effort — don't fail if cgroups unavailable)
+        # Use a unique suffix so each BranchContext gets its own scope
+        # (required for per-branch limits).
+        scope_name = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
         try:
-            self._cgroup_scope = _cgroup.create_scope(f"{os.getpid()}")
+            self._cgroup_scope = _cgroup.create_scope(scope_name)
         except OSError:
             self._cgroup_scope = None
+
+        # Apply resource limits *before* adding any PIDs so the child
+        # is constrained from the moment it starts running.
+        if self._cgroup_scope is not None and self._limits is not None:
+            _cgroup.set_limits(self._cgroup_scope, self._limits)
 
         # Create a private mount directory for the child
         self._private_dir = tempfile.mkdtemp(prefix="branchctx-")
@@ -235,6 +252,7 @@ class BranchContext:
         *,
         isolate: bool = False,
         close_fds: bool = False,
+        limits: ResourceLimits | None = None,
     ) -> Iterator[list["BranchContext"]]:
         """Create N branch contexts, mirroring branch(BR_CREATE, n_branches=N).
 
@@ -245,6 +263,7 @@ class BranchContext:
             workspaces: Sequence of workspace Paths, one per target.
             isolate: BR_ISOLATE — separate user ns per child.
             close_fds: BR_CLOSE_FDS — close inherited fds in children.
+            limits: Optional resource limits applied via cgroup v2.
 
         Yields:
             List of entered BranchContext instances (already forked).
@@ -256,7 +275,8 @@ class BranchContext:
         try:
             for target, workspace in zip(targets, workspaces):
                 ctx = BranchContext(
-                    target, workspace, isolate=isolate, close_fds=close_fds
+                    target, workspace, isolate=isolate, close_fds=close_fds,
+                    limits=limits,
                 )
                 ctx.__enter__()
                 contexts.append(ctx)

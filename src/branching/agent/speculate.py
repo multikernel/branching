@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """Speculate - parallel branch orchestration for AI agents."""
 
+from __future__ import annotations
+
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from pathlib import Path
-from typing import Callable, Sequence, Optional
+from typing import Callable, Sequence, Optional, TYPE_CHECKING
 import threading
 
 from ..core.workspace import Workspace
 from ..exceptions import ConflictError
 from .result import SpeculationResult, SpeculationOutcome
+
+if TYPE_CHECKING:
+    from ..process.limits import ResourceLimits
 
 
 class Speculate:
@@ -31,6 +36,7 @@ class Speculate:
         max_parallel: int | None = None,
         isolate_processes: bool = False,
         timeout: float | None = None,
+        resource_limits: ResourceLimits | None = None,
     ):
         """
         Args:
@@ -41,12 +47,15 @@ class Speculate:
             max_parallel: Maximum parallel workers (default: len(candidates)).
             isolate_processes: Run each candidate in a forked process.
             timeout: Overall timeout in seconds for all candidates.
+            resource_limits: Optional per-branch resource limits (implies
+                process isolation).
         """
         self._candidates = list(candidates)
         self._first_wins = first_wins
         self._max_parallel = max_parallel or len(self._candidates)
         self._isolate_processes = isolate_processes
         self._timeout = timeout
+        self._resource_limits = resource_limits
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
         results: list[SpeculationResult] = [None] * len(self._candidates)  # type: ignore
@@ -71,7 +80,9 @@ class Speculate:
                         b.abort()
                         return result
 
-                    if self._isolate_processes:
+                    if self._resource_limits is not None:
+                        success = self._run_with_limits(b.path, index)
+                    elif self._isolate_processes:
                         success = self._run_in_process(b.path, index)
                     else:
                         success = self._candidates[index](b.path)
@@ -161,3 +172,26 @@ class Speculate:
                 return True
             except ProcessBranchError:
                 return False
+
+    def _run_with_limits(self, path: Path, index: int) -> bool:
+        """Run a candidate in a forked child with resource limits."""
+        from ..process.runner import run_in_process
+        from ..exceptions import ProcessBranchError
+
+        per_candidate = (
+            self._timeout / len(self._candidates)
+            if self._timeout is not None
+            else None
+        )
+
+        try:
+            result = run_in_process(
+                self._candidates[index],
+                (path,),
+                workspace=path,
+                limits=self._resource_limits,
+                timeout=per_candidate,
+            )
+            return bool(result)
+        except ProcessBranchError:
+            return False

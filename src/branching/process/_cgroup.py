@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Cgroup v2 scope management for reliable descendant termination."""
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .limits import ResourceLimits
 
 CGROUP_BASE = Path("/sys/fs/cgroup")
 
@@ -60,6 +66,26 @@ def add_pid(scope: Path, pid: int) -> None:
         OSError: If writing to cgroup.procs fails.
     """
     (scope / "cgroup.procs").write_text(str(pid))
+
+
+def set_limits(scope: Path, limits: ResourceLimits) -> None:
+    """Apply resource limits to a cgroup scope.
+
+    Best-effort — skips ``None`` fields and ignores write errors so that
+    missing controllers don't crash the caller.
+    """
+    if limits.memory is not None:
+        try:
+            (scope / "memory.max").write_text(str(limits.memory))
+        except OSError:
+            pass
+    if limits.cpu is not None:
+        period = 100_000  # 100 ms
+        quota = int(limits.cpu * period)
+        try:
+            (scope / "cpu.max").write_text(f"{quota} {period}")
+        except OSError:
+            pass
 
 
 def kill_scope(scope: Path) -> None:

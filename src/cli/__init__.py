@@ -82,6 +82,34 @@ def _print_error(message: str, args: argparse.Namespace) -> None:
         print(f"error: {message}", file=sys.stderr)
 
 
+def _add_resource_limit_args(parser: argparse.ArgumentParser) -> None:
+    """Add --memory-limit and --cpu-limit flags to a subparser."""
+    parser.add_argument(
+        "--memory-limit",
+        default=None,
+        metavar="SIZE",
+        help="Per-branch memory limit (e.g. 512M, 1G). Implies process isolation.",
+    )
+    parser.add_argument(
+        "--cpu-limit",
+        type=float,
+        default=None,
+        metavar="FRAC",
+        help="Per-branch CPU limit as fraction of 1 CPU (e.g. 0.5 = 50%%). Implies process isolation.",
+    )
+
+
+def _parse_resource_limits(args: argparse.Namespace):
+    """Parse --memory-limit / --cpu-limit into a ResourceLimits or None."""
+    mem_str = getattr(args, "memory_limit", None)
+    cpu_val = getattr(args, "cpu_limit", None)
+    if mem_str is None and cpu_val is None:
+        return None
+    from branching.process.limits import ResourceLimits, parse_memory_size
+    memory = parse_memory_size(mem_str) if mem_str is not None else None
+    return ResourceLimits(memory=memory, cpu=cpu_val)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="branching",
@@ -111,6 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Prompt to commit/abort instead of auto-deciding",
     )
     p_run.add_argument("--json", action="store_true", help="JSON output")
+    _add_resource_limit_args(p_run)
     p_run.add_argument("cmd", nargs=argparse.REMAINDER, metavar="CMD",
                         help="Command to run (after --)")
 
@@ -131,6 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_spec.add_argument("--timeout", type=float, default=None, help="Timeout in seconds")
     p_spec.add_argument("--json", action="store_true", help="JSON output")
+    _add_resource_limit_args(p_spec)
 
     # --- best-of-n ---
     p_bon = sub.add_parser(
@@ -142,6 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_bon.add_argument("-n", type=int, default=3, help="Number of parallel attempts (default: 3)")
     p_bon.add_argument("--timeout", type=float, default=None, help="Timeout in seconds")
     p_bon.add_argument("--json", action="store_true", help="JSON output")
+    _add_resource_limit_args(p_bon)
     p_bon.add_argument("cmd", nargs=argparse.REMAINDER, metavar="CMD",
                         help="Command to run (after --)")
 
@@ -156,6 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_refl.add_argument("--critique", type=str, default=None,
                          help="Shell command to generate feedback after failure")
     p_refl.add_argument("--json", action="store_true", help="JSON output")
+    _add_resource_limit_args(p_refl)
     p_refl.add_argument("cmd", nargs=argparse.REMAINDER, metavar="CMD",
                          help="Command to run (after --)")
 

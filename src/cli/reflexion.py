@@ -9,7 +9,7 @@ from typing import Optional
 
 from branching import Reflexion, Workspace
 
-from . import _print_error, _resolve_workspace
+from . import _parse_resource_limits, _print_error, _resolve_workspace
 
 
 def _make_task(cmd: list[str]):
@@ -57,7 +57,11 @@ def cmd_reflexion(args) -> int:
 
     task = _make_task(args.cmd)
     critique_fn = _make_critique(args.critique) if args.critique else None
-    refl = Reflexion(task, max_retries=args.retries, critique=critique_fn)
+    limits = _parse_resource_limits(args)
+    refl = Reflexion(
+        task, max_retries=args.retries, critique=critique_fn,
+        resource_limits=limits,
+    )
     outcome = refl(ws)
 
     results_summary = []

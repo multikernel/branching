@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """High-level speculation patterns for AI agents."""
 
+from __future__ import annotations
+
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Callable, Optional, Sequence, TYPE_CHECKING
 
 from ..core.workspace import Workspace
 from .result import SpeculationResult, SpeculationOutcome
+
+if TYPE_CHECKING:
+    from ..process.limits import ResourceLimits
 
 
 class BestOfN:
@@ -32,10 +37,12 @@ class BestOfN:
         n: int = 3,
         *,
         timeout: float | None = None,
+        resource_limits: ResourceLimits | None = None,
     ):
         self._task = task
         self._n = n
         self._timeout = timeout
+        self._resource_limits = resource_limits
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
         n = self._n
@@ -52,7 +59,16 @@ class BestOfN:
                 ) as b:
                     result.branch_path = b.path
                     try:
-                        success, score = self._task(b.path, index)
+                        if self._resource_limits is not None:
+                            from ..process.runner import run_in_process
+                            ret = run_in_process(
+                                self._task, (b.path, index),
+                                workspace=b.path,
+                                limits=self._resource_limits,
+                            )
+                            success, score = ret
+                        else:
+                            success, score = self._task(b.path, index)
                         result.success = bool(success)
                         result.score = score
                         result.return_value = (success, score)
@@ -143,6 +159,7 @@ class Reflexion:
         max_retries: int = 3,
         *,
         critique: Optional[Callable[[Path], str]] = None,
+        resource_limits: ResourceLimits | None = None,
     ):
         """
         Args:
@@ -150,10 +167,12 @@ class Reflexion:
                 feedback is None on first attempt, critique output thereafter.
             max_retries: Maximum number of attempts.
             critique: Optional callable(path) -> feedback_string.
+            resource_limits: Optional per-branch resource limits.
         """
         self._task = task
         self._max_retries = max_retries
         self._critique = critique
+        self._resource_limits = resource_limits
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
         results: list[SpeculationResult] = []
@@ -169,7 +188,15 @@ class Reflexion:
                     branch_name, on_success=None, on_error="abort"
                 ) as b:
                     result.branch_path = b.path
-                    success = self._task(b.path, attempt, feedback)
+                    if self._resource_limits is not None:
+                        from ..process.runner import run_in_process
+                        success = run_in_process(
+                            self._task, (b.path, attempt, feedback),
+                            workspace=b.path,
+                            limits=self._resource_limits,
+                        )
+                    else:
+                        success = self._task(b.path, attempt, feedback)
                     result.success = bool(success)
                     result.return_value = success
 
@@ -242,6 +269,7 @@ class TreeOfThoughts:
         ] | None = None,
         max_depth: int = 1,
         timeout: float | None = None,
+        resource_limits: ResourceLimits | None = None,
     ):
         """
         Args:
@@ -254,12 +282,14 @@ class TreeOfThoughts:
                 Only used when max_depth > 1.
             max_depth: Maximum exploration depth (1 = single level).
             timeout: Per-level timeout in seconds.
+            resource_limits: Optional per-branch resource limits.
         """
         self._strategies = list(strategies)
         self._evaluate = evaluate
         self._expand = expand
         self._max_depth = max_depth
         self._timeout = timeout
+        self._resource_limits = resource_limits
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
         if self._expand is None or self._max_depth <= 1:
@@ -289,7 +319,15 @@ class TreeOfThoughts:
                 ) as b:
                     result.branch_path = b.path
                     try:
-                        ret = strategies[index](b.path)
+                        if self._resource_limits is not None:
+                            from ..process.runner import run_in_process
+                            ret = run_in_process(
+                                strategies[index], (b.path,),
+                                workspace=b.path,
+                                limits=self._resource_limits,
+                            )
+                        else:
+                            ret = strategies[index](b.path)
                         if isinstance(ret, tuple):
                             success, score = ret
                         else:
@@ -452,6 +490,7 @@ class BeamSearch:
         beam_width: int = 3,
         max_depth: int = 2,
         timeout: float | None = None,
+        resource_limits: ResourceLimits | None = None,
     ):
         self._strategies = list(strategies)
         self._expand = expand
@@ -459,6 +498,7 @@ class BeamSearch:
         self._beam_width = beam_width
         self._max_depth = max_depth
         self._timeout = timeout
+        self._resource_limits = resource_limits
 
     def _score(self, ret, path):
         """Parse strategy return and apply optional evaluator."""
@@ -504,7 +544,15 @@ class BeamSearch:
                     result.branch_path = b.path
                     beam_branches[index] = b
                     try:
-                        ret = self._strategies[index](b.path)
+                        if self._resource_limits is not None:
+                            from ..process.runner import run_in_process
+                            ret = run_in_process(
+                                self._strategies[index], (b.path,),
+                                workspace=b.path,
+                                limits=self._resource_limits,
+                            )
+                        else:
+                            ret = self._strategies[index](b.path)
                         result.success, result.score = self._score(
                             ret, b.path
                         )
@@ -598,7 +646,15 @@ class BeamSearch:
                         ) as sb:
                             result.branch_path = sb.path
                             try:
-                                ret = strategy(sb.path)
+                                if self._resource_limits is not None:
+                                    from ..process.runner import run_in_process
+                                    ret = run_in_process(
+                                        strategy, (sb.path,),
+                                        workspace=sb.path,
+                                        limits=self._resource_limits,
+                                    )
+                                else:
+                                    ret = strategy(sb.path)
                                 result.success, result.score = self._score(
                                     ret, sb.path
                                 )
@@ -712,6 +768,7 @@ class Tournament:
         *,
         judge: Callable[[Path, Path], int],
         timeout: float | None = None,
+        resource_limits: ResourceLimits | None = None,
     ):
         """
         Args:
@@ -721,11 +778,13 @@ class Tournament:
             judge: Callable(path_a, path_b) → 0 (a wins) or 1 (b wins).
                    Compares two candidates' branches during elimination.
             timeout: Overall timeout in seconds.
+            resource_limits: Optional per-branch resource limits.
         """
         self._task = task
         self._n = n
         self._judge = judge
         self._timeout = timeout
+        self._resource_limits = resource_limits
 
     @staticmethod
     def _run_bracket(
@@ -765,7 +824,15 @@ class Tournament:
                     result.branch_path = b.path
                     branch_paths[index] = b.path
                     try:
-                        success = self._task(b.path, index)
+                        if self._resource_limits is not None:
+                            from ..process.runner import run_in_process
+                            success = run_in_process(
+                                self._task, (b.path, index),
+                                workspace=b.path,
+                                limits=self._resource_limits,
+                            )
+                        else:
+                            success = self._task(b.path, index)
                         result.success = bool(success)
                         result.return_value = success
                     except Exception as e:

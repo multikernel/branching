@@ -8,6 +8,7 @@ from branching import Workspace
 
 from . import (
     _generate_branch_name,
+    _parse_resource_limits,
     _print_error,
     _print_result,
     _resolve_workspace,
@@ -38,10 +39,27 @@ def cmd_run(args) -> int:
     on_error_action = None if args.on_error == "none" else "abort"
 
     ws = Workspace(ws_path)
+    limits = _parse_resource_limits(args)
 
     with ws.branch(branch_name, on_success=None, on_error=None) as b:
-        result = subprocess.run(args.cmd, cwd=b.path)
-        exit_code = result.returncode
+        if limits is not None:
+            from branching.process.context import BranchContext
+
+            def _target(ws_path):
+                import subprocess as sp
+                r = sp.run(args.cmd, cwd=ws_path)
+                if r.returncode != 0:
+                    raise SystemExit(r.returncode)
+
+            with BranchContext(_target, workspace=b.path, limits=limits) as ctx:
+                try:
+                    ctx.wait()
+                    exit_code = 0
+                except Exception:
+                    exit_code = 1
+        else:
+            result = subprocess.run(args.cmd, cwd=b.path)
+            exit_code = result.returncode
 
         if args.ask:
             action = "committed" if _interactive_commit_prompt() else "aborted"

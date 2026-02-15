@@ -8,7 +8,7 @@ from pathlib import Path
 
 from branching import BestOfN, Workspace
 
-from . import _print_error, _resolve_workspace
+from . import _parse_resource_limits, _print_error, _resolve_workspace
 
 
 def _make_task(cmd: list[str]):
@@ -69,7 +69,8 @@ def cmd_best_of_n(args) -> int:
     ws = Workspace(ws_path)
 
     task = _make_task(args.cmd)
-    best = BestOfN(task, n=args.n, timeout=args.timeout)
+    limits = _parse_resource_limits(args)
+    best = BestOfN(task, n=args.n, timeout=args.timeout, resource_limits=limits)
     outcome = best(ws)
 
     results_summary = []
