@@ -268,6 +268,67 @@ Any agent pattern can also opt into process isolation:
 outcome = Speculate(candidates, isolate_processes=True, timeout=60)(ws)
 ```
 
+## CLI
+
+The `branching` command exposes the agent patterns as shell commands.
+Auto-detects the workspace from your current directory, or pass `-w PATH`.
+All commands support `--json` for machine-readable output.
+
+### run
+
+Run a command in a new branch. Commits on exit 0, aborts on non-zero.
+
+```bash
+branching run -- ./build.sh
+branching run --on-error none -- python train.py
+branching run --ask -- make test          # prompt before commit/abort
+```
+
+### speculate
+
+Race N commands in parallel branches. First success wins.
+
+```bash
+branching speculate -c "./fix_a.sh" -c "./fix_b.sh" -c "./fix_c.sh"
+branching speculate --timeout 60 -c "python solve_v1.py" -c "python solve_v2.py"
+```
+
+### best-of-n
+
+Run CMD N times in parallel, commit the highest-scoring success.
+
+The child process can write a score to fd 3 (`echo 0.95 >&3`).
+If nothing is written, score defaults to 1.0 for success / 0.0 for failure.
+Each child receives `BRANCHING_ATTEMPT` (0-indexed) in its environment.
+
+```bash
+branching best-of-n -n 5 -- ./solve.py
+branching best-of-n -n 3 --timeout 120 --json -- python attempt.py
+branching best-of-n -n 3 -- bash -c 'python run.py && echo "$SCORE" >&3'
+```
+
+### reflexion
+
+Sequential retry with optional critique feedback loop.
+
+The child receives `BRANCHING_ATTEMPT` (0-indexed) and `BRANCHING_FEEDBACK`
+(empty on first attempt, critique output on retries) in its environment.
+
+```bash
+branching reflexion --retries 5 -- ./fix.sh
+branching reflexion --retries 3 --critique "./review.sh" -- ./solve.py
+branching reflexion --retries 3 --critique "python critique.py" --json -- python agent.py
+```
+
+### status
+
+Show workspace info and active branches.
+
+```bash
+branching status
+branching status --json
+```
+
 ## How it works
 
 BranchContext uses copy-on-write filesystems to create instant, zero-cost
@@ -286,106 +347,3 @@ Process isolation (`BranchContext`) uses unprivileged Linux user namespaces
 to give each child its own filesystem view. No root required - works on any
 Linux distribution with `unprivileged_userns_clone=1` (the default).
 
-## API reference
-
-The library has three layers. Imports are lazy - only the layer you use
-gets loaded.
-
-```python
-from branching import Workspace      # FS layer only
-from branching import BranchContext  # process layer only
-from branching import Speculate      # agent layer (+ FS layer)
-```
-
-### Workspace and Branch
-
-**`Workspace(path)`** - open a workspace from an existing mount.
-
-| Property / Method | Description |
-|---|---|
-| `.path` | Mount root path |
-| `.fstype` | Detected backend (`"branchfs"` or `"daxfs"`) |
-| `.branch(name, on_success="commit", on_error="abort")` | Create a branch (returns `Branch` context manager) |
-
-**`Branch`** - context manager for an isolated workspace view.
-
-| Property / Method | Description |
-|---|---|
-| `.name` | Branch name |
-| `.path` | Working directory for this branch |
-| `.branch_path` | Full path (e.g. `"/main/feature"`) |
-| `.branch(name, ...)` | Create a nested child branch |
-| `.commit()` | Merge changes into parent |
-| `.abort()` | Roll back to parent |
-
-`on_success` accepts `"commit"` or `None`.
-`on_error` accepts `"abort"` or `None`.
-
-### BranchContext (process isolation)
-
-**`BranchContext(target, workspace, *, close_fds=False)`** - run a function
-in a sandboxed child process.
-
-| Property / Method | Description |
-|---|---|
-| `target` | `Callable[[Path], None]` - return normally for success, raise for failure |
-| `workspace` | Directory to bind-mount into the child |
-| `.pid` | Child PID |
-| `.alive` | Whether the child is still running |
-| `.wait(timeout=None)` | Block until exit; raises `ProcessBranchError` on failure, `TimeoutError` on timeout |
-| `.abort(timeout=5.0)` | Abort child and all its descendants |
-
-**`BranchContext.create(targets, workspaces, *, close_fds=False)`** - fork N
-children at once; cleans up all on exit.
-
-### Agent patterns
-
-All patterns: instantiate with config, call with a `Workspace`, get a
-`SpeculationOutcome`.
-
-| Pattern | Constructor | What it does |
-|---|---|---|
-| **`Speculate`** | `(candidates, *, first_wins=True, max_parallel=None, isolate_processes=False, timeout=None)` | Run candidates in parallel; first success wins |
-| **`BestOfN`** | `(task, n=3, *, timeout=None)` | Run N copies; commit highest-scoring success |
-| **`Reflexion`** | `(task, max_retries=3, *, critique=None)` | Retry with critique feedback loop |
-| **`TreeOfThoughts`** | `(strategies, *, evaluate=None, expand=None, max_depth=1, timeout=None)` | Parallel strategy tree with optional depth expansion |
-| **`BeamSearch`** | `(strategies, *, expand, evaluate=None, beam_width=3, max_depth=2, timeout=None)` | Multi-level beam search; top-K branches survive each depth |
-| **`Tournament`** | `(task, n=4, *, judge, timeout=None)` | Generate N candidates; pairwise elimination picks winner |
-
-### Result types
-
-**`SpeculationOutcome`** - returned by all agent patterns.
-
-| Field | Description |
-|---|---|
-| `.committed` | Whether a winner was committed |
-| `.winner` | `SpeculationResult` or `None` |
-| `.all_results` | All candidate results |
-
-**`SpeculationResult`** - one candidate's outcome.
-
-| Field | Description |
-|---|---|
-| `.branch_index` | Candidate index |
-| `.success` | Whether the candidate succeeded |
-| `.score` | Quality score (default 0.0) |
-| `.return_value` | Raw return value |
-| `.exception` | Exception if failed, else `None` |
-| `.branch_path` | Working directory used |
-
-### Exceptions
-
-```
-BranchingError                  # base for all errors
-├── MountError                  # filesystem mount/unmount failed
-├── BranchError                 # branch operation failed
-│   ├── BranchStaleError        # a sibling branch was already committed
-│   ├── BranchNotFoundError     # branch does not exist
-│   ├── CommitError             # commit failed
-│   │   └── ConflictError       # another branch already committed
-│   └── AbortError              # abort failed
-├── ProcessBranchError          # sandboxed child process failed
-│   ├── ForkError               # fork() failed
-│   └── NamespaceError          # sandbox setup failed
-└── MemoryBranchError           # memory branching failed
-```
