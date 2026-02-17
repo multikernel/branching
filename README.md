@@ -16,10 +16,47 @@ Based on the paper [Fork, Explore, Commit: OS Primitives for Agentic Exploration
 ## Install
 
 ```
-pip install .
+pip install BranchContext
 ```
 
 Requires Python >= 3.10. No external dependencies.
+
+### Docker
+
+The Docker image ships with [BranchFS](https://github.com/multikernel/branchfs)
+built in — no need to install FUSE, compile Rust, or configure any filesystem
+yourself. Just pull the image and go:
+
+```bash
+docker pull multikernel/branching
+```
+
+Run directly with `docker run`:
+
+```bash
+docker run --rm --device /dev/fuse --cap-add SYS_ADMIN \
+  --security-opt apparmor:unconfined \
+  -v $(pwd):/src multikernel/branching run -- make test
+```
+
+Or use the `branching-docker` wrapper (in `integration/docker/`) which handles
+the Docker flags for you:
+
+```bash
+branching-docker -w ./myproject run -- make test
+branching-docker -w . speculate -c "./fix_a.sh" -c "./fix_b.sh"
+branching-docker -w . best-of-n -n 5 -- ./solve.py
+```
+
+The `-w` flag specifies a host directory to use as the workspace. It is
+bind-mounted into the container, and BranchFS is mounted on top automatically.
+Committed changes are written back to the host directory.
+
+To build the image from source:
+
+```bash
+docker build -t branching -f integration/docker/Dockerfile .
+```
 
 ## Quick start
 
