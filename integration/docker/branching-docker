@@ -1,0 +1,62 @@
+#!/bin/sh
+set -eu
+
+IMAGE="${BRANCHING_IMAGE:-branching}"
+WORKSPACE=""
+ARGS=""
+
+usage() {
+    cat <<EOF
+Usage: branching-docker -w <workspace> [branching args...]
+
+Run branching inside a Docker container with BranchFS.
+
+The workspace directory is bind-mounted from the host and backed by
+a BranchFS copy-on-write layer inside the container. Committed changes
+are written back to the host directory.
+
+Options:
+  -w PATH    Host directory to use as workspace (required)
+  -h         Show this help
+
+Environment:
+  BRANCHING_IMAGE   Docker image name (default: branching)
+
+Examples:
+  branching-docker -w ./myproject run -- make test
+  branching-docker -w /home/user/repo speculate -c "./fix_a.sh" -c "./fix_b.sh"
+  branching-docker -w . best-of-n -n 5 -- ./solve.py
+  branching-docker -w . reflexion --retries 3 -- ./fix.sh
+EOF
+    exit "${1:-0}"
+}
+
+# Parse -w (workspace) before forwarding the rest to branching
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -w)
+            [ $# -ge 2 ] || { echo "error: -w requires a path" >&2; exit 1; }
+            WORKSPACE="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage 0
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [ -z "$WORKSPACE" ]; then
+    echo "error: -w <workspace> is required" >&2
+    usage 1
+fi
+
+WORKSPACE="$(cd "$WORKSPACE" && pwd)"
+
+exec docker run --rm \
+    --device /dev/fuse --cap-add SYS_ADMIN \
+    --security-opt apparmor:unconfined \
+    -v "$WORKSPACE":/src \
+    "$IMAGE" "$@"
