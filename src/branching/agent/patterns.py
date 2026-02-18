@@ -422,7 +422,7 @@ class TreeOfThoughts:
                             parent_cgroup=parent_cgroup,
                             scope_callback=_on_scope if self._resource_limits else None,
                         )
-                        if isinstance(ret, tuple):
+                        if isinstance(ret, (tuple, list)):
                             success, score = ret
                         else:
                             success = bool(ret)
@@ -604,7 +604,7 @@ class BeamSearch:
 
     def _score(self, ret, path):
         """Parse strategy return and apply optional evaluator."""
-        if isinstance(ret, tuple):
+        if isinstance(ret, (tuple, list)):
             success, score = ret
         else:
             success = bool(ret)

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-import traceback
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,14 +25,14 @@ def run_in_process(
 ) -> Any:
     """Run *fn(*args)* in a forked child process, optionally with cgroup limits.
 
-    The child writes its return value (or exception info) to a result file
-    inside *workspace*.  The parent reads the result after the child exits.
+    Results are passed back via an inherited pipe fd — no filesystem
+    dependency, so this works even when the workspace is a FUSE mount
+    inaccessible from the child's user namespace.
 
     Args:
         fn: Callable to execute.
         args: Positional arguments for *fn*.
-        workspace: Branch workspace path (used for the result file and as the
-            BranchContext workspace).
+        workspace: Branch workspace path (passed to BranchContext).
         limits: Optional resource limits applied to the child's cgroup.
         timeout: Maximum seconds to wait for the child.
         parent_cgroup: Optional parent cgroup for hierarchical nesting.
@@ -49,45 +48,47 @@ def run_in_process(
             abnormally without writing a result.
         Exception: Re-raised from the child if *fn* raised.
     """
-    result_path = workspace / ".branching_result"
+    read_fd, write_fd = os.pipe()
 
     def _target(ws_path: Path) -> None:
+        os.close(read_fd)
         try:
             value = fn(*args)
-            result_path.write_text(json.dumps({"ok": True, "value": repr(value)}))
-            # Store the actual value via a second file so we can return
-            # JSON-safe primitives directly and fall back to repr for the rest.
-            _write_result(result_path, value)
+            _write_result_fd(write_fd, {"ok": True, "value": value})
         except BaseException as exc:
-            try:
-                result_path.write_text(
-                    json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
-                )
-            except Exception:
-                pass
+            _write_result_fd(
+                write_fd, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            )
             raise
+        finally:
+            os.close(write_fd)
 
-    with BranchContext(
-        _target, workspace=workspace, limits=limits,
-        parent_cgroup=parent_cgroup,
-    ) as ctx:
-        if scope_callback is not None and ctx.cgroup_scope is not None:
-            scope_callback(ctx.cgroup_scope)
-        try:
-            ctx.wait(timeout=timeout)
-        except ProcessBranchError:
-            pass  # handled below via result file
+    try:
+        with BranchContext(
+            _target, workspace=workspace, limits=limits,
+            parent_cgroup=parent_cgroup,
+        ) as ctx:
+            os.close(write_fd)
+            write_fd = -1  # prevent double-close in except branch
+            if scope_callback is not None and ctx.cgroup_scope is not None:
+                scope_callback(ctx.cgroup_scope)
+            try:
+                ctx.wait(timeout=timeout)
+            except ProcessBranchError:
+                pass  # handled below via pipe
+    except Exception:
+        if write_fd >= 0:
+            os.close(write_fd)
+        raise
 
-    # Read result
-    if not result_path.exists():
+    # Read result from pipe
+    data = _read_result_fd(read_fd)
+    os.close(read_fd)
+
+    if data is None:
         raise ProcessBranchError(
             "Child process did not produce a result (possibly OOM-killed)"
         )
-
-    try:
-        data = json.loads(result_path.read_text())
-    finally:
-        result_path.unlink(missing_ok=True)
 
     if data.get("ok"):
         return data.get("value")
@@ -95,10 +96,27 @@ def run_in_process(
     raise ProcessBranchError(data.get("error", "unknown child error"))
 
 
-def _write_result(path: Path, value: Any) -> None:
-    """Write a JSON result file.  Handles non-serializable values gracefully."""
+def _write_result_fd(fd: int, data: dict) -> None:
+    """Write a JSON result dict to a pipe fd, handling non-serializable values."""
     try:
-        payload = json.dumps({"ok": True, "value": value})
+        payload = json.dumps(data).encode()
     except (TypeError, ValueError):
-        payload = json.dumps({"ok": True, "value": repr(value)})
-    path.write_text(payload)
+        # Fall back to repr for non-JSON-serializable values
+        fallback = dict(data)
+        if "value" in fallback:
+            fallback["value"] = repr(fallback["value"])
+        payload = json.dumps(fallback).encode()
+    os.write(fd, payload)
+
+
+def _read_result_fd(fd: int) -> dict | None:
+    """Read a JSON result dict from a pipe fd.  Returns None on empty read."""
+    chunks = []
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    if not chunks:
+        return None
+    return json.loads(b"".join(chunks))
