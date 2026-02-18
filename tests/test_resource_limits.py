@@ -874,8 +874,14 @@ class TestSpeculateCgroupKill:
         from branching.agent.speculate import Speculate
 
         killed = []
+
+        def mock_rip(fn, args, *, workspace, limits,
+                     timeout=None, parent_cgroup=None, scope_callback=None):
+            return fn(*args)
+
         ws = self._mock_workspace()
-        with patch("branching.process._cgroup.kill_scope",
+        with patch("branching.process.runner.run_in_process", side_effect=mock_rip), \
+             patch("branching.process._cgroup.kill_scope",
                    side_effect=lambda s: killed.append(s)):
             spec = Speculate(
                 [lambda p: True, lambda p: True],
@@ -921,7 +927,7 @@ class TestBestOfNCgroupKill:
             return (True, float(idx))
 
         ws = _mock_workspace()
-        with patch("branching.process.runner.run_in_process", side_effect=mock_rip), \
+        with patch("branching.agent.patterns.run_in_process", side_effect=mock_rip), \
              patch("branching.process._cgroup.kill_scope",
                    side_effect=lambda s: killed.append(s)):
             bon = BestOfN(
@@ -949,7 +955,7 @@ class TestBestOfNCgroupKill:
             return (True, float(idx))
 
         ws = _mock_workspace()
-        with patch("branching.process.runner.run_in_process", side_effect=mock_rip), \
+        with patch("branching.agent.patterns.run_in_process", side_effect=mock_rip), \
              patch("branching.process._cgroup.kill_scope",
                    side_effect=lambda s: killed.append(s)):
             bon = BestOfN(
@@ -979,7 +985,7 @@ class TestTreeOfThoughtsCgroupKill:
 
         ws = _mock_workspace()
         strats = [lambda p: (True, 0.5), lambda p: (True, 0.9)]
-        with patch("branching.process.runner.run_in_process", side_effect=mock_rip), \
+        with patch("branching.agent.patterns.run_in_process", side_effect=mock_rip), \
              patch("branching.process._cgroup.kill_scope",
                    side_effect=lambda s: killed.append(s)):
             tot = TreeOfThoughts(
@@ -1005,7 +1011,7 @@ class TestTournamentCgroupKill:
             return True
 
         ws = _mock_workspace()
-        with patch("branching.process.runner.run_in_process", side_effect=mock_rip), \
+        with patch("branching.agent.patterns.run_in_process", side_effect=mock_rip), \
              patch("branching.process._cgroup.kill_scope",
                    side_effect=lambda s: killed.append(s)):
             t = Tournament(

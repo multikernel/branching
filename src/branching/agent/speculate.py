@@ -34,7 +34,6 @@ class Speculate:
         *,
         first_wins: bool = True,
         max_parallel: int | None = None,
-        isolate_processes: bool = False,
         timeout: float | None = None,
         resource_limits: ResourceLimits | None = None,
         group_limits: ResourceLimits | None = None,
@@ -46,17 +45,14 @@ class Speculate:
             first_wins: If True, commit the first successful candidate and
                 abort siblings. If False, run all and commit the first success.
             max_parallel: Maximum parallel workers (default: len(candidates)).
-            isolate_processes: Run each candidate in a forked process.
             timeout: Overall timeout in seconds for all candidates.
-            resource_limits: Optional per-branch resource limits (implies
-                process isolation).
+            resource_limits: Optional per-branch resource limits.
             group_limits: Optional resource limits applied to the root
                 cgroup that contains all branches.
         """
         self._candidates = list(candidates)
         self._first_wins = first_wins
         self._max_parallel = max_parallel or len(self._candidates)
-        self._isolate_processes = isolate_processes
         self._timeout = timeout
         self._resource_limits = resource_limits
         self._group_limits = group_limits
@@ -117,18 +113,13 @@ class Speculate:
                         b.abort()
                         return result
 
-                    if self._resource_limits is not None:
-                        def _on_scope(scope_path: Path, _i: int = index) -> None:
-                            branch_scopes[_i] = scope_path
+                    def _on_scope(scope_path: Path, _i: int = index) -> None:
+                        branch_scopes[_i] = scope_path
 
-                        success = self._run_with_limits(
-                            b.path, index, root_cgroup,
-                            scope_callback=_on_scope,
-                        )
-                    elif self._isolate_processes:
-                        success = self._run_in_process(b.path, index)
-                    else:
-                        success = self._candidates[index](b.path)
+                    success = self._run_with_limits(
+                        b.path, index, root_cgroup,
+                        scope_callback=_on_scope if self._resource_limits else None,
+                    )
 
                     result.success = bool(success)
                     result.return_value = success
@@ -195,28 +186,6 @@ class Speculate:
             all_results=results,
             committed=committed,
         )
-
-    def _run_in_process(self, path: Path, index: int) -> bool:
-        """Run a candidate in a forked child process."""
-        from ..process.context import BranchContext
-        from ..exceptions import ProcessBranchError
-
-        def target(workspace: Path) -> None:
-            if not self._candidates[index](workspace):
-                raise ProcessBranchError("Candidate returned failure")
-
-        per_candidate = (
-            self._timeout / len(self._candidates)
-            if self._timeout is not None
-            else None
-        )
-
-        with BranchContext(target, workspace=path) as pb:
-            try:
-                pb.wait(timeout=per_candidate)
-                return True
-            except ProcessBranchError:
-                return False
 
     def _run_with_limits(
         self, path: Path, index: int, parent_cgroup: Path | None = None,

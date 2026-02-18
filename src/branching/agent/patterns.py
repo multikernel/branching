@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence, TYPE_CHECKING
 
 from ..core.workspace import Workspace
+from ..process.runner import run_in_process
 from .result import SpeculationResult, SpeculationOutcome
 
 if TYPE_CHECKING:
@@ -90,22 +91,17 @@ class BestOfN:
                 ) as b:
                     result.branch_path = b.path
                     try:
-                        if self._resource_limits is not None:
-                            from ..process.runner import run_in_process
+                        def _on_scope(sp: Path, _i: int = index) -> None:
+                            branch_scopes[_i] = sp
 
-                            def _on_scope(sp: Path, _i: int = index) -> None:
-                                branch_scopes[_i] = sp
-
-                            ret = run_in_process(
-                                self._task, (b.path, index),
-                                workspace=b.path,
-                                limits=self._resource_limits,
-                                parent_cgroup=root_cgroup,
-                                scope_callback=_on_scope,
-                            )
-                            success, score = ret
-                        else:
-                            success, score = self._task(b.path, index)
+                        ret = run_in_process(
+                            self._task, (b.path, index),
+                            workspace=b.path,
+                            limits=self._resource_limits,
+                            parent_cgroup=root_cgroup,
+                            scope_callback=_on_scope if self._resource_limits else None,
+                        )
+                        success, score = ret
                         result.success = bool(success)
                         result.score = score
                         result.return_value = (success, score)
@@ -254,16 +250,12 @@ class Reflexion:
                     branch_name, on_success=None, on_error="abort"
                 ) as b:
                     result.branch_path = b.path
-                    if self._resource_limits is not None:
-                        from ..process.runner import run_in_process
-                        success = run_in_process(
-                            self._task, (b.path, attempt, feedback),
-                            workspace=b.path,
-                            limits=self._resource_limits,
-                            parent_cgroup=root_cgroup,
-                        )
-                    else:
-                        success = self._task(b.path, attempt, feedback)
+                    success = run_in_process(
+                        self._task, (b.path, attempt, feedback),
+                        workspace=b.path,
+                        limits=self._resource_limits,
+                        parent_cgroup=root_cgroup,
+                    )
                     result.success = bool(success)
                     result.return_value = success
 
@@ -420,21 +412,16 @@ class TreeOfThoughts:
                 ) as b:
                     result.branch_path = b.path
                     try:
-                        if self._resource_limits is not None:
-                            from ..process.runner import run_in_process
+                        def _on_scope(sp: Path, _i: int = index) -> None:
+                            branch_scopes[_i] = sp
 
-                            def _on_scope(sp: Path, _i: int = index) -> None:
-                                branch_scopes[_i] = sp
-
-                            ret = run_in_process(
-                                strategies[index], (b.path,),
-                                workspace=b.path,
-                                limits=self._resource_limits,
-                                parent_cgroup=parent_cgroup,
-                                scope_callback=_on_scope,
-                            )
-                        else:
-                            ret = strategies[index](b.path)
+                        ret = run_in_process(
+                            strategies[index], (b.path,),
+                            workspace=b.path,
+                            limits=self._resource_limits,
+                            parent_cgroup=parent_cgroup,
+                            scope_callback=_on_scope if self._resource_limits else None,
+                        )
                         if isinstance(ret, tuple):
                             success, score = ret
                         else:
@@ -702,21 +689,16 @@ class BeamSearch:
                     result.branch_path = b.path
                     beam_branches[index] = b
                     try:
-                        if self._resource_limits is not None:
-                            from ..process.runner import run_in_process
+                        def _on_scope(sp: Path, _i: int = index) -> None:
+                            beam_task_scopes[_i] = sp
 
-                            def _on_scope(sp: Path, _i: int = index) -> None:
-                                beam_task_scopes[_i] = sp
-
-                            ret = run_in_process(
-                                self._strategies[index], (b.path,),
-                                workspace=b.path,
-                                limits=self._resource_limits,
-                                parent_cgroup=beam_cgroups[index],
-                                scope_callback=_on_scope,
-                            )
-                        else:
-                            ret = self._strategies[index](b.path)
+                        ret = run_in_process(
+                            self._strategies[index], (b.path,),
+                            workspace=b.path,
+                            limits=self._resource_limits,
+                            parent_cgroup=beam_cgroups[index],
+                            scope_callback=_on_scope if self._resource_limits else None,
+                        )
                         result.success, result.score = self._score(
                             ret, b.path
                         )
@@ -813,23 +795,18 @@ class BeamSearch:
                         ) as sb:
                             result.branch_path = sb.path
                             try:
-                                if self._resource_limits is not None:
-                                    from ..process.runner import run_in_process
+                                def _on_sub_scope(
+                                    sp: Path, _j: int = idx,
+                                ) -> None:
+                                    sub_scopes[_j] = sp
 
-                                    def _on_sub_scope(
-                                        sp: Path, _j: int = idx,
-                                    ) -> None:
-                                        sub_scopes[_j] = sp
-
-                                    ret = run_in_process(
-                                        strategy, (sb.path,),
-                                        workspace=sb.path,
-                                        limits=self._resource_limits,
-                                        parent_cgroup=beam_cgroups[beam_idx],
-                                        scope_callback=_on_sub_scope,
-                                    )
-                                else:
-                                    ret = strategy(sb.path)
+                                ret = run_in_process(
+                                    strategy, (sb.path,),
+                                    workspace=sb.path,
+                                    limits=self._resource_limits,
+                                    parent_cgroup=beam_cgroups[beam_idx],
+                                    scope_callback=_on_sub_scope if self._resource_limits else None,
+                                )
                                 result.success, result.score = self._score(
                                     ret, sb.path
                                 )
@@ -1038,21 +1015,16 @@ class Tournament:
                     result.branch_path = b.path
                     branch_paths[index] = b.path
                     try:
-                        if self._resource_limits is not None:
-                            from ..process.runner import run_in_process
+                        def _on_scope(sp: Path, _i: int = index) -> None:
+                            branch_scopes[_i] = sp
 
-                            def _on_scope(sp: Path, _i: int = index) -> None:
-                                branch_scopes[_i] = sp
-
-                            success = run_in_process(
-                                self._task, (b.path, index),
-                                workspace=b.path,
-                                limits=self._resource_limits,
-                                parent_cgroup=root_cgroup,
-                                scope_callback=_on_scope,
-                            )
-                        else:
-                            success = self._task(b.path, index)
+                        success = run_in_process(
+                            self._task, (b.path, index),
+                            workspace=b.path,
+                            limits=self._resource_limits,
+                            parent_cgroup=root_cgroup,
+                            scope_callback=_on_scope if self._resource_limits else None,
+                        )
                         result.success = bool(success)
                         result.return_value = success
                     except Exception as e:
