@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Optional, Sequence, TYPE_CHECKING
 
 from ..core.workspace import Workspace
 from ..process.runner import run_in_process
+from ..exceptions import ConflictError
 from .result import SpeculationResult, SpeculationOutcome
 
 if TYPE_CHECKING:
@@ -1101,3 +1102,280 @@ class Tournament:
             all_results=all_results,
             committed=committed,
         )
+
+
+class Cascaded:
+    """Cascaded speculation: start narrow, widen on failure with feedback.
+
+    Runs successive waves of parallel candidates with increasing fan-out.
+    Wave 0 starts with few candidates (typically one).  If all fail, the
+    next wave runs more candidates, each informed by error context from
+    prior failures.  Within each wave, first-winner-commit semantics
+    apply: the first successful candidate commits and siblings are aborted.
+
+    The task callable receives ``(path, feedback)`` and returns
+    ``(success, error_context)``.  *feedback* is always a list of error
+    strings from prior failed attempts (empty on wave 0).
+
+    Example::
+
+        def solve(path: Path, feedback: list[str]) -> tuple[bool, str]:
+            result = run_agent(path, prior_errors=feedback)
+            if result.tests_pass:
+                return True, ""
+            return False, result.error_output
+
+        outcome = Cascaded(solve, fan_out=(1, 2, 4))(ws)
+    """
+
+    def __init__(
+        self,
+        task: Callable[[Path, list[str]], tuple[bool, str]],
+        *,
+        fan_out: Sequence[int] = (1, 2, 4),
+        timeout: float | None = None,
+        wave_timeout: float | None = None,
+        resource_limits: ResourceLimits | None = None,
+        group_limits: ResourceLimits | None = None,
+    ):
+        """
+        Args:
+            task: Callable(path, feedback) -> (success, error_context).
+                *feedback* is a list of error strings from all prior
+                failed attempts (empty list on the first wave).
+                Returns a tuple of (success_bool, error_string).  The
+                error string is collected as feedback for subsequent
+                waves when the attempt fails; ignored on success.
+            fan_out: Number of parallel candidates per wave.
+                Default ``(1, 2, 4)`` runs 1 candidate in wave 0,
+                2 in wave 1, 4 in wave 2.  The number of waves equals
+                ``len(fan_out)``.
+            timeout: Overall timeout in seconds across all waves.
+            wave_timeout: Per-wave timeout in seconds.
+            resource_limits: Optional per-branch resource limits.
+            group_limits: Optional resource limits for the root cgroup.
+        """
+        self._task = task
+        self._fan_out = list(fan_out)
+        self._timeout = timeout
+        self._wave_timeout = wave_timeout
+        self._resource_limits = resource_limits
+        self._group_limits = group_limits
+
+    def __call__(self, workspace: Workspace) -> SpeculationOutcome:
+        import os as _os
+
+        root_cgroup: Optional[Path] = None
+        if self._resource_limits is not None and self._group_limits is not None:
+            try:
+                from ..process._cgroup import create_group
+                root_cgroup = create_group(
+                    f"cascaded-{_os.getpid()}",
+                    limits=self._group_limits,
+                )
+            except OSError:
+                root_cgroup = None
+
+        try:
+            return self._run(workspace, root_cgroup)
+        finally:
+            if root_cgroup is not None:
+                from ..process._cgroup import kill_scope
+                kill_scope(root_cgroup)
+
+    def _run(
+        self, workspace: Workspace, root_cgroup: Optional[Path],
+    ) -> SpeculationOutcome:
+        all_results: list[SpeculationResult] = []
+        feedback: list[str] = []
+        base_index = 0
+
+        deadline = (
+            time.monotonic() + self._timeout
+            if self._timeout is not None
+            else None
+        )
+
+        for wave, width in enumerate(self._fan_out):
+            if deadline is not None and deadline - time.monotonic() <= 0:
+                break
+
+            # Snapshot so concurrent/later mutations don't leak in.
+            feedback_snapshot = list(feedback)
+            wave_errors: list[str] = []
+
+            outcome = self._run_wave(
+                workspace, wave, width, feedback_snapshot, base_index,
+                root_cgroup, deadline, wave_errors,
+            )
+            all_results.extend(outcome.all_results)
+
+            if outcome.committed:
+                return SpeculationOutcome(
+                    winner=outcome.winner,
+                    all_results=all_results,
+                    committed=True,
+                )
+
+            feedback.extend(wave_errors)
+            base_index += width
+
+        return SpeculationOutcome(all_results=all_results, committed=False)
+
+    def _run_wave(
+        self,
+        workspace: Workspace,
+        wave: int,
+        width: int,
+        feedback: list[str],
+        base_index: int,
+        root_cgroup: Optional[Path],
+        deadline: Optional[float],
+        wave_errors: list[str],
+    ) -> SpeculationOutcome:
+        """Run a single wave of parallel candidates with first-wins."""
+        results: list[Optional[SpeculationResult]] = [None] * width
+        winner: Optional[SpeculationResult] = None
+        committed = False
+        cancel_event = threading.Event()
+
+        branch_scopes: dict[int, Path] = {}
+
+        def _kill_scopes(exclude: int = -1) -> None:
+            from ..process._cgroup import kill_scope
+            for idx, scope in list(branch_scopes.items()):
+                if idx != exclude:
+                    kill_scope(scope)
+
+        # Compute effective wave timeout.
+        wt = self._wave_timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            wt = min(wt, remaining) if wt is not None else remaining
+
+        def _run_candidate(index: int) -> SpeculationResult:
+            global_index = base_index + index
+            branch_name = f"cascaded_w{wave}_{index}"
+            result = SpeculationResult(
+                branch_index=global_index, success=False,
+            )
+
+            if cancel_event.is_set():
+                return result
+
+            try:
+                with workspace.branch(
+                    branch_name, on_success=None, on_error="abort"
+                ) as b:
+                    result.branch_path = b.path
+
+                    if cancel_event.is_set():
+                        b.abort()
+                        return result
+
+                    def _on_scope(scope_path: Path, _i: int = index) -> None:
+                        branch_scopes[_i] = scope_path
+
+                    success, error_ctx = self._run_task(
+                        b.path, feedback, root_cgroup,
+                        scope_callback=_on_scope if self._resource_limits else None,
+                        timeout=wt,
+                    )
+
+                    result.success = bool(success)
+                    result.return_value = (success, error_ctx)
+
+                    if result.success and not cancel_event.is_set():
+                        cancel_event.set()
+                        _kill_scopes(index)
+                        try:
+                            b.commit()
+                        except ConflictError:
+                            result.success = False
+                            b.abort()
+                        return result
+                    else:
+                        if (
+                            not cancel_event.is_set()
+                            and error_ctx
+                        ):
+                            wave_errors.append(error_ctx)
+                        b.abort()
+                        return result
+
+            except Exception as e:
+                result.exception = e
+                return result
+
+        with ThreadPoolExecutor(max_workers=width) as pool:
+            futures: dict = {}
+            for i in range(width):
+                f = pool.submit(_run_candidate, i)
+                futures[f] = i
+
+            try:
+                for f in as_completed(futures, timeout=wt):
+                    idx = futures[f]
+                    try:
+                        result = f.result()
+                    except Exception as e:
+                        result = SpeculationResult(
+                            branch_index=base_index + idx,
+                            success=False,
+                            exception=e,
+                        )
+                    results[idx] = result
+
+                    if result.success and winner is None:
+                        winner = result
+                        committed = True
+            except TimeoutError:
+                cancel_event.set()
+                _kill_scopes()
+
+            for f in futures:
+                if not f.done():
+                    try:
+                        f.result(timeout=5.0)
+                    except Exception:
+                        pass
+
+        for i, r in enumerate(results):
+            if r is None:
+                results[i] = SpeculationResult(
+                    branch_index=base_index + i, success=False,
+                )
+
+        return SpeculationOutcome(
+            winner=winner,
+            all_results=results,
+            committed=committed,
+        )
+
+    def _run_task(
+        self,
+        path: Path,
+        feedback: list[str],
+        parent_cgroup: Optional[Path],
+        scope_callback=None,
+        timeout: Optional[float] = None,
+    ) -> tuple[bool, str]:
+        """Run the task in a forked child with resource limits."""
+        from ..exceptions import ProcessBranchError
+
+        try:
+            ret = run_in_process(
+                self._task,
+                (path, feedback),
+                workspace=path,
+                limits=self._resource_limits,
+                timeout=timeout,
+                parent_cgroup=parent_cgroup,
+                scope_callback=scope_callback,
+            )
+            if isinstance(ret, (tuple, list)):
+                success, error_ctx = ret
+                return bool(success), str(error_ctx) if error_ctx else ""
+            return bool(ret), ""
+        except ProcessBranchError:
+            return False, ""

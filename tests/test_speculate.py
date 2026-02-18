@@ -8,7 +8,7 @@ import pytest
 from branching.core.base import FSBackend
 from branching.core.workspace import Workspace
 from branching.agent.speculate import Speculate
-from branching.agent.patterns import BestOfN, Reflexion, TreeOfThoughts, BeamSearch, Tournament
+from branching.agent.patterns import BestOfN, Reflexion, TreeOfThoughts, BeamSearch, Tournament, Cascaded
 from branching.agent.result import SpeculationResult, SpeculationOutcome
 
 
@@ -725,6 +725,238 @@ class TestTournament:
         assert outcome.committed
         assert outcome.all_results[0].exception is not None
         assert outcome.winner.branch_index != 0
+
+
+class TestCascaded:
+    def test_succeeds_wave_0(self):
+        """Task succeeds on first try — only 1 branch used."""
+        ws = _make_workspace()
+
+        def task(path, feedback):
+            return True, ""
+
+        outcome = Cascaded(task, fan_out=(1, 2, 4))(ws)
+        assert outcome.committed
+        assert outcome.winner is not None
+        assert outcome.winner.branch_index == 0
+        assert len(outcome.all_results) == 1
+
+    def test_succeeds_wave_1(self):
+        """Task fails wave 0, succeeds in wave 1."""
+        ws = _make_workspace()
+
+        def task(path, feedback):
+            if not feedback:
+                return False, "tests failed"
+            return True, ""
+
+        outcome = Cascaded(task, fan_out=(1, 2))(ws)
+        assert outcome.committed
+        # 1 result from wave 0 + 2 from wave 1
+        assert len(outcome.all_results) == 3
+        # Winner should be from wave 1 (global index 1 or 2)
+        assert outcome.winner.branch_index >= 1
+
+    def test_succeeds_wave_2(self):
+        """Task fails waves 0 and 1, succeeds in wave 2."""
+        ws = _make_workspace()
+
+        def task(path, feedback):
+            if len(feedback) < 2:
+                return False, "not enough context"
+            return True, ""
+
+        outcome = Cascaded(task, fan_out=(1, 1, 4))(ws)
+        assert outcome.committed
+        # 1 + 1 + 4 = 6 total results
+        assert len(outcome.all_results) == 6
+        # Winner from wave 2 (global index 2..5)
+        assert outcome.winner.branch_index >= 2
+
+    def test_all_waves_fail(self):
+        """All waves fail — nothing committed."""
+        ws = _make_workspace()
+
+        def task(path, feedback):
+            return False, "nope"
+
+        outcome = Cascaded(task, fan_out=(1, 2))(ws)
+        assert not outcome.committed
+        assert outcome.winner is None
+        assert len(outcome.all_results) == 3
+
+    def test_feedback_passed(self):
+        """Error context is passed as feedback to subsequent waves."""
+        ws = _make_workspace()
+        received = []
+
+        def task(path, feedback):
+            received.append(list(feedback))
+            if not feedback:
+                return False, "error: test failed"
+            return True, ""
+
+        outcome = Cascaded(task, fan_out=(1, 1))(ws)
+        assert outcome.committed
+        # Wave 0: empty feedback
+        assert received[0] == []
+        # Wave 1: feedback from wave 0's error context
+        assert received[1] == ["error: test failed"]
+
+    def test_feedback_accumulates(self):
+        """Error context accumulates across waves."""
+        ws = _make_workspace()
+        received = []
+
+        call_count = [0]
+
+        def task(path, feedback):
+            received.append(list(feedback))
+            call_count[0] += 1
+            if len(feedback) < 2:
+                return False, f"fail_{call_count[0]}"
+            return True, ""
+
+        # Use width=1 per wave to avoid threading non-determinism
+        outcome = Cascaded(task, fan_out=(1, 1, 1))(ws)
+        assert outcome.committed
+        assert received[0] == []
+        assert len(received[1]) == 1  # 1 error from wave 0
+        assert len(received[2]) == 2  # 1 from wave 0 + 1 from wave 1
+
+    def test_empty_error_not_collected(self):
+        """Empty error strings are not added to feedback."""
+        ws = _make_workspace()
+        received = []
+        call_count = [0]
+
+        def task(path, feedback):
+            received.append(list(feedback))
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return False, ""  # fail with no error context
+            return True, ""
+
+        outcome = Cascaded(task, fan_out=(1, 1))(ws)
+        assert outcome.committed
+        assert received[0] == []
+        # Empty error string should not be collected
+        assert received[1] == []
+
+    def test_fan_out_scaling(self):
+        """Correct number of branches per wave."""
+        ws = _make_workspace()
+        call_count = [0]
+
+        def task(path, feedback):
+            call_count[0] += 1
+            return False, "err"
+
+        outcome = Cascaded(task, fan_out=(1, 3, 5))(ws)
+        assert not outcome.committed
+        assert call_count[0] == 9
+        assert len(outcome.all_results) == 9
+
+    def test_exception_in_candidate(self):
+        """Exception in wave 0 doesn't crash cascade; wave 1 succeeds."""
+        ws = _make_workspace()
+        call_count = [0]
+
+        def task(path, feedback):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("boom")
+            return True, ""
+
+        outcome = Cascaded(task, fan_out=(1, 2))(ws)
+        assert outcome.committed
+        assert outcome.all_results[0].exception is not None
+
+    def test_commits_exactly_one(self):
+        """Only the winner is committed."""
+        ws = _make_workspace()
+
+        def task(path, feedback):
+            return True, ""
+
+        outcome = Cascaded(task, fan_out=(1,))(ws)
+        assert outcome.committed
+        assert len(MockFSBackend._commits) == 1
+        assert len(MockFSBackend._aborts) == 0
+
+    def test_wave_1_commits_exactly_one(self):
+        """In wave with multiple candidates, only winner commits."""
+        ws = _make_workspace()
+
+        def task(path, feedback):
+            if not feedback:
+                return False, "err"
+            return True, ""
+
+        outcome = Cascaded(task, fan_out=(1, 3))(ws)
+        assert outcome.committed
+        # At least 1 commit (the winner) and at least 1 abort (wave 0)
+        assert len(MockFSBackend._commits) >= 1
+        assert len(MockFSBackend._aborts) >= 1
+
+    def test_global_branch_indices(self):
+        """Branch indices are globally unique across waves."""
+        ws = _make_workspace()
+
+        def task(path, feedback):
+            if not feedback:
+                return False, "err"
+            return True, ""
+
+        outcome = Cascaded(task, fan_out=(1, 2))(ws)
+        indices = [r.branch_index for r in outcome.all_results]
+        assert len(indices) == len(set(indices))  # all unique
+        assert sorted(indices) == [0, 1, 2]
+
+    def test_single_wave(self):
+        """fan_out=(1,) behaves like a single attempt."""
+        ws = _make_workspace()
+
+        def task(path, feedback):
+            return False, "err"
+
+        outcome = Cascaded(task, fan_out=(1,))(ws)
+        assert not outcome.committed
+        assert len(outcome.all_results) == 1
+
+    def test_runs_waves_in_parallel_within_wave(self):
+        """Candidates within a wave run concurrently."""
+        import time
+        ws = _make_workspace()
+        start = time.monotonic()
+
+        def task(path, feedback):
+            if not feedback:
+                return False, "err"
+            time.sleep(0.2)
+            return True, ""
+
+        outcome = Cascaded(task, fan_out=(1, 3))(ws)
+        elapsed = time.monotonic() - start
+        assert outcome.committed
+        # 3 tasks @ 0.2s in parallel should be ~0.2s, not ~0.6s
+        assert elapsed < 0.5
+
+    def test_feedback_is_snapshot(self):
+        """Each wave gets a snapshot of feedback, not a live reference."""
+        ws = _make_workspace()
+        received = []
+
+        def task(path, feedback):
+            received.append(feedback)
+            return False, "err"
+
+        outcome = Cascaded(task, fan_out=(1, 1, 1))(ws)
+        assert not outcome.committed
+        # Each wave's feedback should be an independent list
+        assert received[0] is not received[1]
+        if len(received) > 2:
+            assert received[1] is not received[2]
 
 
 class TestSpeculationResult:

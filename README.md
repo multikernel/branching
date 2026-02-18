@@ -76,7 +76,7 @@ raises, everything is rolled back - the workspace is untouched.
 
 ## Agent patterns
 
-BranchContext ships with six high-level patterns that cover the most common
+BranchContext ships with seven high-level patterns that cover the most common
 agent workflows. Each is a callable class: instantiate with config, call with
 a workspace.
 
@@ -239,6 +239,39 @@ def judge(path_a: Path, path_b: Path) -> int:
 outcome = Tournament(generate_patch, n=8, judge=judge)(ws)
 ```
 
+### Cascaded speculation (adaptive fan-out)
+
+Start with one attempt. If it fails, widen to more parallel candidates,
+each informed by error context from prior failures. Repeat with increasing
+fan-out until one succeeds or all waves are exhausted.
+
+Inspired by [Cascade Speculative Drafting](https://arxiv.org/abs/2312.11462),
+which applies the same start-cheap-escalate-on-failure principle to LLM
+token generation.
+
+Use when most tasks succeed on the first try and you want to minimize
+wasted compute: coding agents where one LLM call usually works but
+occasionally needs retries with error feedback, test-fix loops where the
+error log from a failed attempt is the best guide for the next one, or
+any workload with variable difficulty where paying for N parallel branches
+upfront is wasteful.
+
+```python
+from branching import Cascaded
+
+def solve(path: Path, feedback: list[str]) -> tuple[bool, str]:
+    result = run_agent(path, prior_errors=feedback)
+    if result.tests_pass:
+        return True, ""
+    return False, result.error_output
+
+outcome = Cascaded(solve, fan_out=(1, 2, 4), timeout=120)(ws)
+```
+
+The task returns `(success, error_context)`. On failure, the error string
+is collected and passed as feedback to subsequent waves. On success, it is
+ignored. Empty error strings are silently dropped.
+
 ## Lower-level usage
 
 The patterns above are built on two lower-level primitives you can use
@@ -320,7 +353,7 @@ outcome = BestOfN(scored_task, n=5, resource_limits=limits)(ws)
 ```
 
 All patterns accept `resource_limits`: `Speculate`, `BestOfN`, `Reflexion`,
-`TreeOfThoughts`, `BeamSearch`, and `Tournament`. Fields default to `None`
+`TreeOfThoughts`, `BeamSearch`, `Tournament`, and `Cascaded`. Fields default to `None`
 (unlimited). A `ResourceLimits()` with all `None` fields triggers process
 isolation without applying any limits.
 
