@@ -25,8 +25,15 @@ class BestOfN:
     finishing. The main thread picks the winner based on score, then
     signals each thread to commit (winner) or abort (losers).
 
-    Each candidate callable receives (path,) and returns
-    (success: bool, score: float).
+    Each candidate callable receives (path,) and returns ``bool`` or
+    ``(success: bool, score: float)``.  A bare ``bool`` defaults to
+    score 1.0/0.0 unless overridden by *scores* or *evaluate*.
+
+    Score resolution per successful candidate (highest priority first):
+        1. evaluate(path)      — external scorer callback
+        2. candidate (bool, f) — candidate's own score
+        3. scores[i]           — pre-computed score (e.g. logprobs)
+        4. 1.0                 — default
 
     Example:
         candidates = [lambda p: (run_tests(p), score(p)) for _ in range(5)]
@@ -36,16 +43,31 @@ class BestOfN:
 
     def __init__(
         self,
-        candidates: Sequence[Callable[[Path], tuple[bool, float]]],
+        candidates: Sequence[Callable[[Path], bool | tuple[bool, float]]],
         *,
+        scores: Sequence[float] | None = None,
+        evaluate: Callable[[Path], float] | None = None,
         timeout: float | None = None,
         resource_limits: ResourceLimits | None = None,
         group_limits: ResourceLimits | None = None,
     ):
         self._candidates = list(candidates)
+        self._scores = list(scores) if scores is not None else None
+        self._evaluate = evaluate
         self._timeout = timeout
         self._resource_limits = resource_limits
         self._group_limits = group_limits
+
+    def _score(self, ret, path, index):
+        """Parse candidate return and apply optional evaluator."""
+        if isinstance(ret, (tuple, list)):
+            success, score = ret
+        else:
+            success = bool(ret)
+            score = self._scores[index] if self._scores else (1.0 if success else 0.0)
+        if self._evaluate and success:
+            score = self._evaluate(path)
+        return bool(success), score
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
         import os as _os
@@ -101,10 +123,10 @@ class BestOfN:
                             parent_cgroup=root_cgroup,
                             scope_callback=_on_scope if self._resource_limits else None,
                         )
-                        success, score = ret
-                        result.success = bool(success)
+                        success, score = self._score(ret, b.path, index)
+                        result.success = success
                         result.score = score
-                        result.return_value = (success, score)
+                        result.return_value = ret
                     except Exception as e:
                         result.exception = e
 

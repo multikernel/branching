@@ -121,6 +121,20 @@ class TestBestOfN:
         assert outcome.winner.score == 0.9
         assert len(outcome.all_results) == 3
 
+    def test_bool_candidates(self):
+        """Candidates returning bare bool get score 1.0/0.0."""
+        ws = _make_workspace()
+
+        candidates = [
+            lambda p: False,
+            lambda p: True,
+        ]
+
+        outcome = BestOfN(candidates)(ws)
+        assert outcome.committed
+        assert outcome.winner.branch_index == 1
+        assert outcome.winner.score == 1.0
+
     def test_skips_failures(self):
         ws = _make_workspace()
 
@@ -136,7 +150,7 @@ class TestBestOfN:
     def test_all_fail(self):
         ws = _make_workspace()
 
-        candidates = [lambda p: (False, 0.0) for _ in range(3)]
+        candidates = [lambda p: False for _ in range(3)]
 
         outcome = BestOfN(candidates)(ws)
         assert not outcome.committed
@@ -177,15 +191,98 @@ class TestBestOfN:
         ws = _make_workspace()
         start = time.monotonic()
 
-        def slow(path: Path) -> tuple[bool, float]:
+        def slow(path: Path) -> bool:
             time.sleep(0.2)
-            return True, 1.0
+            return True
 
         outcome = BestOfN([slow, slow, slow])(ws)
         elapsed = time.monotonic() - start
         assert outcome.committed
         # 3 tasks @ 0.2s each; parallel should be ~0.2s, sequential ~0.6s
         assert elapsed < 0.5
+
+    def test_scores_param(self):
+        """Pre-computed scores override default 1.0/0.0 for bool candidates."""
+        ws = _make_workspace()
+
+        candidates = [lambda p: True, lambda p: True, lambda p: True]
+        logprob_scores = [-2.5, -0.1, -1.3]
+
+        outcome = BestOfN(candidates, scores=logprob_scores)(ws)
+        assert outcome.committed
+        assert outcome.winner.branch_index == 1  # highest logprob
+        assert outcome.winner.score == -0.1
+
+    def test_scores_ignored_for_tuple_return(self):
+        """When candidate returns (bool, float), scores param is ignored."""
+        ws = _make_workspace()
+
+        candidates = [
+            lambda p: (True, 5.0),   # candidate provides own score
+            lambda p: (True, 10.0),  # candidate provides own score
+        ]
+
+        outcome = BestOfN(candidates, scores=[99.0, 1.0])(ws)
+        assert outcome.committed
+        assert outcome.winner.branch_index == 1  # tuple score 10.0 wins
+        assert outcome.winner.score == 10.0
+
+    def test_scores_skipped_for_failures(self):
+        """Failed bool candidates don't use pre-computed scores."""
+        ws = _make_workspace()
+
+        candidates = [lambda p: False, lambda p: True]
+        outcome = BestOfN(candidates, scores=[99.0, 0.5])(ws)
+        assert outcome.committed
+        assert outcome.winner.branch_index == 1
+        assert outcome.winner.score == 0.5
+
+    def test_evaluate_callback(self):
+        """External evaluate callback overrides all other scores."""
+        ws = _make_workspace()
+
+        candidates = [
+            lambda p: (True, 10.0),  # candidate says 10
+            lambda p: (True, 1.0),   # candidate says 1
+        ]
+
+        calls = []
+        def evaluate(path):
+            calls.append(path)
+            return float(len(calls))  # 1.0 for first, 2.0 for second
+
+        outcome = BestOfN(candidates, evaluate=evaluate)(ws)
+        assert outcome.committed
+        assert len(calls) == 2
+
+    def test_evaluate_not_called_on_failure(self):
+        """evaluate is only called for successful candidates."""
+        ws = _make_workspace()
+
+        eval_calls = []
+        def evaluate(path):
+            eval_calls.append(path)
+            return 1.0
+
+        candidates = [lambda p: False, lambda p: True]
+        outcome = BestOfN(candidates, evaluate=evaluate)(ws)
+        assert outcome.committed
+        assert len(eval_calls) == 1
+
+    def test_evaluate_overrides_scores_param(self):
+        """evaluate takes priority over both tuple scores and scores param."""
+        ws = _make_workspace()
+
+        candidates = [lambda p: True, lambda p: True]
+
+        outcome = BestOfN(
+            candidates,
+            scores=[100.0, 1.0],
+            evaluate=lambda p: 42.0,
+        )(ws)
+        assert outcome.committed
+        # Both get evaluate score 42.0; either could win (both equal)
+        assert outcome.winner.score == 42.0
 
 
 class TestReflexion:

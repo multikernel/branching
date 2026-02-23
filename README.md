@@ -118,6 +118,10 @@ Pairs naturally with the ``n=`` parameter in OpenAI's Chat Completions API
 to generate N variations in a single call, then test each in an isolated
 branch.
 
+Candidates can return ``bool`` or ``(bool, float)``. Scoring is flexible:
+pass pre-computed ``scores`` (e.g. from logprobs), provide an ``evaluate``
+callback for post-execution scoring, or let candidates score themselves.
+
 ```python
 from branching import BestOfN
 
@@ -130,6 +134,32 @@ def make_candidate(code: str):
 
 candidates = [make_candidate(c) for c in generate_solutions(n=5)]
 outcome = BestOfN(candidates)(ws)
+```
+
+**Logprobs workflow** — score candidates externally using model confidence,
+then let BestOfN pick the highest-scoring one that passes:
+
+```python
+from branching import BestOfN
+import openai
+
+client = openai.OpenAI()
+resp = client.chat.completions.create(
+    model="gpt-4o", n=5, logprobs=True, top_logprobs=1,
+    messages=[{"role": "user", "content": prompt}],
+)
+
+# Pre-computed confidence scores from logprobs
+logprob_scores = [
+    sum(t.logprob for t in c.logprobs.content) / len(c.logprobs.content)
+    for c in resp.choices
+]
+
+# Candidates just apply code and test — return bare bool
+candidates = [make_test(c.message.content) for c in resp.choices]
+
+# BestOfN picks the highest-logprob passing candidate
+outcome = BestOfN(candidates, scores=logprob_scores)(ws)
 ```
 
 ### Reflexion (retry with feedback)
