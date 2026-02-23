@@ -24,7 +24,7 @@ Requires Python >= 3.10. No external dependencies.
 ### Docker
 
 The Docker image ships with [BranchFS](https://github.com/multikernel/branchfs)
-built in — no need to install FUSE, compile Rust, or configure any filesystem
+built in -- no need to install FUSE, compile Rust, or configure any filesystem
 yourself. Just pull the image and go:
 
 ```bash
@@ -88,20 +88,28 @@ committed; the rest are aborted.
 Use when you have several plausible approaches and care about latency more
 than optimality: bug fixes where any passing patch is good enough, tool
 selection where multiple tools could work, or prompt variants where you
-just need one that doesn't error out.
+just need one that doesn't error out. Pairs naturally with the ``n=``
+parameter in OpenAI's Chat Completions API to race N variations in
+parallel.
 
 ```python
 from branching import Workspace, Speculate
+import openai
 
-def try_fix_a(path: Path) -> bool:
-    apply_patch(path / "a.patch")
-    return run_tests(path)
+client = openai.OpenAI()
+resp = client.chat.completions.create(
+    model="gpt-4o", n=5,
+    messages=[{"role": "user", "content": prompt}],
+)
 
-def try_fix_b(path: Path) -> bool:
-    apply_patch(path / "b.patch")
-    return run_tests(path)
+def make_candidate(code: str):
+    def candidate(path: Path) -> bool:
+        (path / "fix.py").write_text(code)
+        return run_tests(path)
+    return candidate
 
-outcome = Speculate([try_fix_a, try_fix_b], first_wins=True, timeout=60)(ws)
+candidates = [make_candidate(c.message.content) for c in resp.choices]
+outcome = Speculate(candidates, first_wins=True, timeout=60)(ws)
 
 if outcome.committed:
     print(f"Fix {outcome.winner.branch_index} succeeded!")
@@ -124,23 +132,6 @@ callback for post-execution scoring, or let candidates score themselves.
 
 ```python
 from branching import BestOfN
-
-def make_candidate(code: str):
-    def candidate(path: Path) -> tuple[bool, float]:
-        (path / "solution.py").write_text(code)
-        passed = run_tests(path)
-        return passed, evaluate_quality(path) if passed else 0.0
-    return candidate
-
-candidates = [make_candidate(c) for c in generate_solutions(n=5)]
-outcome = BestOfN(candidates)(ws)
-```
-
-**Logprobs workflow** — score candidates externally using model confidence,
-then let BestOfN pick the highest-scoring one that passes:
-
-```python
-from branching import BestOfN
 import openai
 
 client = openai.OpenAI()
@@ -155,7 +146,7 @@ logprob_scores = [
     for c in resp.choices
 ]
 
-# Candidates just apply code and test — return bare bool
+# Candidates just apply code and test -- return bare bool
 candidates = [make_test(c.message.content) for c in resp.choices]
 
 # BestOfN picks the highest-logprob passing candidate
