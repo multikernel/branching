@@ -415,7 +415,7 @@ class TestPatternResourceLimitsAcceptance:
     def test_best_of_n_accepts_resource_limits(self):
         from branching.agent.patterns import BestOfN
         rl = ResourceLimits(cpu=0.5)
-        bon = BestOfN(lambda p, i: (True, 1.0), n=2, resource_limits=rl)
+        bon = BestOfN([lambda p: (True, 1.0)] * 2, resource_limits=rl)
         assert bon._resource_limits is rl
 
     def test_reflexion_accepts_resource_limits(self):
@@ -444,7 +444,7 @@ class TestPatternResourceLimitsAcceptance:
         from branching.agent.patterns import Tournament
         rl = ResourceLimits(memory=4096)
         t = Tournament(
-            lambda p, i: True, n=2,
+            [lambda p: True] * 2,
             judge=lambda a, b: 0,
             resource_limits=rl,
         )
@@ -468,7 +468,7 @@ class TestPatternGroupLimitsAcceptance:
     def test_best_of_n_accepts_group_limits(self):
         from branching.agent.patterns import BestOfN
         gl = ResourceLimits(cpu=2.0)
-        bon = BestOfN(lambda p, i: (True, 1.0), n=2, group_limits=gl)
+        bon = BestOfN([lambda p: (True, 1.0)] * 2, group_limits=gl)
         assert bon._group_limits is gl
 
     def test_reflexion_accepts_group_limits(self):
@@ -497,7 +497,7 @@ class TestPatternGroupLimitsAcceptance:
         from branching.agent.patterns import Tournament
         gl = ResourceLimits(memory=4096, cpu=2.0)
         t = Tournament(
-            lambda p, i: True, n=2,
+            [lambda p: True] * 2,
             judge=lambda a, b: 0,
             group_limits=gl,
         )
@@ -923,15 +923,14 @@ class TestBestOfNCgroupKill:
             scope = workspace / ".scope"
             if scope_callback:
                 scope_callback(scope)
-            idx = args[1]
-            return (True, float(idx))
+            return fn(*args)
 
         ws = _mock_workspace()
         with patch("branching.agent.patterns.run_in_process", side_effect=mock_rip), \
              patch("branching.process._cgroup.kill_scope",
                    side_effect=lambda s: killed.append(s)):
             bon = BestOfN(
-                lambda p, i: (True, float(i)), n=2,
+                [lambda p, i=i: (True, float(i)) for i in range(2)],
                 resource_limits=ResourceLimits(memory=1024),
             )
             bon._run(ws, None)
@@ -949,17 +948,21 @@ class TestBestOfNCgroupKill:
             scope = workspace / ".scope"
             if scope_callback:
                 scope_callback(scope)
-            idx = args[1]
-            if idx == 1:
-                time.sleep(2)  # simulate stuck task
-            return (True, float(idx))
+            return fn(*args)
+
+        def fast(p):
+            return (True, 0.0)
+
+        def stuck(p):
+            time.sleep(2)
+            return (True, 1.0)
 
         ws = _mock_workspace()
         with patch("branching.agent.patterns.run_in_process", side_effect=mock_rip), \
              patch("branching.process._cgroup.kill_scope",
                    side_effect=lambda s: killed.append(s)):
             bon = BestOfN(
-                lambda p, i: (True, float(i)), n=2,
+                [fast, stuck],
                 timeout=0.05,
                 resource_limits=ResourceLimits(memory=1024),
             )
@@ -1008,14 +1011,14 @@ class TestTournamentCgroupKill:
             scope = workspace / ".scope"
             if scope_callback:
                 scope_callback(scope)
-            return True
+            return fn(*args)
 
         ws = _mock_workspace()
         with patch("branching.agent.patterns.run_in_process", side_effect=mock_rip), \
              patch("branching.process._cgroup.kill_scope",
                    side_effect=lambda s: killed.append(s)):
             t = Tournament(
-                lambda p, i: True, n=2,
+                [lambda p: True] * 2,
                 judge=lambda a, b: 0,
                 resource_limits=ResourceLimits(memory=1024),
             )
@@ -1030,7 +1033,7 @@ class TestTournamentCgroupKill:
         with patch("branching.process._cgroup.kill_scope",
                    side_effect=lambda s: killed.append(s)):
             t = Tournament(
-                lambda p, i: True, n=2,
+                [lambda p: True] * 2,
                 judge=lambda a, b: 0,
             )
             t._run(ws, None)

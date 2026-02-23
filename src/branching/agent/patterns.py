@@ -19,31 +19,30 @@ if TYPE_CHECKING:
 
 
 class BestOfN:
-    """Run N copies of a task in parallel, commit the highest-scoring one.
+    """Run N candidates in parallel, commit the highest-scoring one.
 
     All candidates run concurrently. Each holds its branch open after
     finishing. The main thread picks the winner based on score, then
     signals each thread to commit (winner) or abort (losers).
 
-    The task callable receives (path, attempt_index) and returns
+    Each candidate callable receives (path,) and returns
     (success: bool, score: float).
 
     Example:
-        outcome = BestOfN(scored_task, n=5)(ws)
-        # Commits the highest-scoring successful attempt
+        candidates = [lambda p: (run_tests(p), score(p)) for _ in range(5)]
+        outcome = BestOfN(candidates)(ws)
+        # Commits the highest-scoring successful candidate
     """
 
     def __init__(
         self,
-        task: Callable[[Path, int], tuple[bool, float]],
-        n: int = 3,
+        candidates: Sequence[Callable[[Path], tuple[bool, float]]],
         *,
         timeout: float | None = None,
         resource_limits: ResourceLimits | None = None,
         group_limits: ResourceLimits | None = None,
     ):
-        self._task = task
-        self._n = n
+        self._candidates = list(candidates)
         self._timeout = timeout
         self._resource_limits = resource_limits
         self._group_limits = group_limits
@@ -70,7 +69,7 @@ class BestOfN:
                 kill_scope(root_cgroup)
 
     def _run(self, workspace: Workspace, root_cgroup: Optional[Path]) -> SpeculationOutcome:
-        n = self._n
+        n = len(self._candidates)
         results: list[Optional[SpeculationResult]] = [None] * n
         task_done = [threading.Event() for _ in range(n)]
         decision_ready = [threading.Event() for _ in range(n)]
@@ -96,7 +95,7 @@ class BestOfN:
                             branch_scopes[_i] = sp
 
                         ret = run_in_process(
-                            self._task, (b.path, index),
+                            self._candidates[index], (b.path,),
                             workspace=b.path,
                             limits=self._resource_limits,
                             parent_cgroup=root_cgroup,
@@ -911,20 +910,19 @@ class BeamSearch:
 
 
 class Tournament:
-    """Pairwise elimination bracket: generate N candidates, compare
+    """Pairwise elimination bracket: run N candidates, compare
     pairwise via a judge function, commit the final winner.
 
     The convergent dual of TreeOfThoughts: starts wide, narrows to one.
 
     Example:
-        outcome = Tournament(task, n=4, judge=judge)(ws)
+        outcome = Tournament(candidates, judge=judge)(ws)
         # Commits the bracket winner
     """
 
     def __init__(
         self,
-        task: Callable[[Path, int], bool],
-        n: int = 4,
+        candidates: Sequence[Callable[[Path], bool]],
         *,
         judge: Callable[[Path, Path], int],
         timeout: float | None = None,
@@ -933,17 +931,16 @@ class Tournament:
     ):
         """
         Args:
-            task: Callable(branch_path, candidate_index) → success.
-                  Produces output in the branch directory.
-            n: Number of candidates to generate.
+            candidates: Callables that take a Path (branch working dir)
+                  and return True on success. Each produces output in
+                  the branch directory for the judge to compare.
             judge: Callable(path_a, path_b) → 0 (a wins) or 1 (b wins).
                    Compares two candidates' branches during elimination.
             timeout: Overall timeout in seconds.
             resource_limits: Optional per-branch resource limits.
             group_limits: Optional resource limits for the root cgroup.
         """
-        self._task = task
-        self._n = n
+        self._candidates = list(candidates)
         self._judge = judge
         self._timeout = timeout
         self._resource_limits = resource_limits
@@ -992,7 +989,7 @@ class Tournament:
                 kill_scope(root_cgroup)
 
     def _run(self, workspace: Workspace, root_cgroup: Optional[Path]) -> SpeculationOutcome:
-        n = self._n
+        n = len(self._candidates)
         results: list[Optional[SpeculationResult]] = [None] * n
         branch_paths: list[Optional[Path]] = [None] * n
         task_done = [threading.Event() for _ in range(n)]
@@ -1020,7 +1017,7 @@ class Tournament:
                             branch_scopes[_i] = sp
 
                         success = run_in_process(
-                            self._task, (b.path, index),
+                            self._candidates[index], (b.path,),
                             workspace=b.path,
                             limits=self._resource_limits,
                             parent_cgroup=root_cgroup,

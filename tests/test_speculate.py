@@ -110,11 +110,12 @@ class TestBestOfN:
     def test_picks_highest_score(self):
         ws = _make_workspace()
 
-        def task(path: Path, attempt: int) -> tuple[bool, float]:
-            scores = [0.3, 0.9, 0.6]
-            return True, scores[attempt]
+        scores = [0.3, 0.9, 0.6]
+        candidates = [
+            lambda p, s=s: (True, s) for s in scores
+        ]
 
-        outcome = BestOfN(task, n=3)(ws)
+        outcome = BestOfN(candidates)(ws)
         assert outcome.committed
         assert outcome.winner.branch_index == 1
         assert outcome.winner.score == 0.9
@@ -123,22 +124,21 @@ class TestBestOfN:
     def test_skips_failures(self):
         ws = _make_workspace()
 
-        def task(path: Path, attempt: int) -> tuple[bool, float]:
-            if attempt == 0:
-                return False, 0.0  # Fail with score 0
-            return True, 0.5
+        candidates = [
+            lambda p: (False, 0.0),
+            lambda p: (True, 0.5),
+        ]
 
-        outcome = BestOfN(task, n=2)(ws)
+        outcome = BestOfN(candidates)(ws)
         assert outcome.committed
         assert outcome.winner.branch_index == 1
 
     def test_all_fail(self):
         ws = _make_workspace()
 
-        def task(path: Path, attempt: int) -> tuple[bool, float]:
-            return False, 0.0
+        candidates = [lambda p: (False, 0.0) for _ in range(3)]
 
-        outcome = BestOfN(task, n=3)(ws)
+        outcome = BestOfN(candidates)(ws)
         assert not outcome.committed
         assert outcome.winner is None
         assert len(outcome.all_results) == 3
@@ -146,12 +146,12 @@ class TestBestOfN:
     def test_exception_in_candidate(self):
         ws = _make_workspace()
 
-        def task(path: Path, attempt: int) -> tuple[bool, float]:
-            if attempt == 0:
-                raise RuntimeError("boom")
-            return True, 1.0
+        def exploding(path: Path) -> tuple[bool, float]:
+            raise RuntimeError("boom")
 
-        outcome = BestOfN(task, n=2)(ws)
+        candidates = [exploding, lambda p: (True, 1.0)]
+
+        outcome = BestOfN(candidates)(ws)
         assert outcome.committed
         assert outcome.winner.branch_index == 1
         assert outcome.all_results[0].exception is not None
@@ -160,10 +160,11 @@ class TestBestOfN:
         """Only the winner should be committed; all others aborted."""
         ws = _make_workspace()
 
-        def task(path: Path, attempt: int) -> tuple[bool, float]:
-            return True, float(attempt)
+        candidates = [
+            lambda p, s=s: (True, float(s)) for s in range(3)
+        ]
 
-        outcome = BestOfN(task, n=3)(ws)
+        outcome = BestOfN(candidates)(ws)
         assert outcome.committed
         assert outcome.winner.branch_index == 2  # highest score
         # Exactly 1 commit, rest aborted
@@ -176,11 +177,11 @@ class TestBestOfN:
         ws = _make_workspace()
         start = time.monotonic()
 
-        def task(path: Path, attempt: int) -> tuple[bool, float]:
+        def slow(path: Path) -> tuple[bool, float]:
             time.sleep(0.2)
             return True, 1.0
 
-        outcome = BestOfN(task, n=3)(ws)
+        outcome = BestOfN([slow, slow, slow])(ws)
         elapsed = time.monotonic() - start
         assert outcome.committed
         # 3 tasks @ 0.2s each; parallel should be ~0.2s, sequential ~0.6s
@@ -615,13 +616,12 @@ class TestTournament:
         """4 candidates, judge always picks second → candidate 3 wins."""
         ws = _make_workspace()
 
-        def task(path: Path, index: int) -> bool:
-            return True
+        candidates = [lambda p: True for _ in range(4)]
 
         def judge(path_a: Path, path_b: Path) -> int:
             return 1  # always pick b
 
-        outcome = Tournament(task, n=4, judge=judge)(ws)
+        outcome = Tournament(candidates, judge=judge)(ws)
         assert outcome.committed
         assert outcome.winner is not None
         # Bracket: (0v1→1), (2v3→3), (1v3→3)
@@ -632,13 +632,12 @@ class TestTournament:
         """No survivors means nothing committed."""
         ws = _make_workspace()
 
-        def task(path: Path, index: int) -> bool:
-            return False
+        candidates = [lambda p: False for _ in range(3)]
 
         def judge(path_a, path_b):
             raise AssertionError("judge should not be called")
 
-        outcome = Tournament(task, n=3, judge=judge)(ws)
+        outcome = Tournament(candidates, judge=judge)(ws)
         assert not outcome.committed
         assert outcome.winner is None
         assert len(outcome.all_results) == 3
@@ -648,14 +647,15 @@ class TestTournament:
         ws = _make_workspace()
         judge_calls = []
 
-        def task(path: Path, index: int) -> bool:
-            return index == 2
+        candidates = [
+            lambda p, i=i: i == 2 for i in range(4)
+        ]
 
         def judge(path_a, path_b):
             judge_calls.append(1)
             return 0
 
-        outcome = Tournament(task, n=4, judge=judge)(ws)
+        outcome = Tournament(candidates, judge=judge)(ws)
         assert outcome.committed
         assert outcome.winner.branch_index == 2
         assert len(judge_calls) == 0
@@ -664,13 +664,12 @@ class TestTournament:
         """3 candidates: one gets a bye in round 1."""
         ws = _make_workspace()
 
-        def task(path: Path, index: int) -> bool:
-            return True
+        candidates = [lambda p: True for _ in range(3)]
 
         def judge(path_a: Path, path_b: Path) -> int:
             return 0  # always pick a
 
-        outcome = Tournament(task, n=3, judge=judge)(ws)
+        outcome = Tournament(candidates, judge=judge)(ws)
         assert outcome.committed
         # Bracket: (0v1→0), bye 2, then (0v2→0)
         assert outcome.winner.branch_index == 0
@@ -679,13 +678,12 @@ class TestTournament:
         """Only the winner should be committed; all others aborted."""
         ws = _make_workspace()
 
-        def task(path: Path, index: int) -> bool:
-            return True
+        candidates = [lambda p: True for _ in range(4)]
 
         def judge(path_a, path_b):
             return 0
 
-        outcome = Tournament(task, n=4, judge=judge)(ws)
+        outcome = Tournament(candidates, judge=judge)(ws)
         assert outcome.committed
         assert len(MockFSBackend._commits) == 1
         assert len(MockFSBackend._aborts) == 3
@@ -696,14 +694,14 @@ class TestTournament:
         ws = _make_workspace()
         start = time.monotonic()
 
-        def task(path: Path, index: int) -> bool:
+        def slow(path: Path) -> bool:
             time.sleep(0.2)
             return True
 
         def judge(path_a, path_b):
             return 0
 
-        outcome = Tournament(task, n=3, judge=judge)(ws)
+        outcome = Tournament([slow, slow, slow], judge=judge)(ws)
         elapsed = time.monotonic() - start
         assert outcome.committed
         # 3 tasks @ 0.2s each; parallel ~0.2s, sequential ~0.6s
@@ -713,15 +711,15 @@ class TestTournament:
         """Exception in one candidate → eliminated, others proceed."""
         ws = _make_workspace()
 
-        def task(path: Path, index: int) -> bool:
-            if index == 0:
-                raise RuntimeError("boom")
-            return True
+        def exploding(path: Path) -> bool:
+            raise RuntimeError("boom")
+
+        candidates = [exploding, lambda p: True, lambda p: True]
 
         def judge(path_a, path_b):
             return 0
 
-        outcome = Tournament(task, n=3, judge=judge)(ws)
+        outcome = Tournament(candidates, judge=judge)(ws)
         assert outcome.committed
         assert outcome.all_results[0].exception is not None
         assert outcome.winner.branch_index != 0

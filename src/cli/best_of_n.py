@@ -11,14 +11,14 @@ from branching import BestOfN, Workspace
 from . import _parse_group_limits, _parse_resource_limits, _print_error, _resolve_workspace
 
 
-def _make_task(cmd: list[str]):
-    """Wrap a command into a BestOfN task callable.
+def _make_candidate(cmd: list[str], index: int):
+    """Wrap a command into a BestOfN candidate callable.
 
-    Returns a callable(path, index) -> (success, score).
+    Returns a callable(path) -> (success, score).
     The child process can write a score float to fd 3.
     """
 
-    def task(workdir: Path, index: int) -> tuple[bool, float]:
+    def candidate(workdir: Path) -> tuple[bool, float]:
         # Create a pipe for the child to report its score.
         # Python 3.4+ creates pipe fds with CLOEXEC, so they are
         # automatically closed on exec — only fd 3 (dup2 clears
@@ -57,7 +57,7 @@ def _make_task(cmd: list[str]):
 
         return (success, score)
 
-    return task
+    return candidate
 
 
 def cmd_best_of_n(args) -> int:
@@ -68,10 +68,10 @@ def cmd_best_of_n(args) -> int:
     ws_path = _resolve_workspace(args)
     ws = Workspace(ws_path)
 
-    task = _make_task(args.cmd)
+    candidates = [_make_candidate(args.cmd, i) for i in range(args.n)]
     limits = _parse_resource_limits(args)
     group_limits = _parse_group_limits(args)
-    best = BestOfN(task, n=args.n, timeout=args.timeout, resource_limits=limits, group_limits=group_limits)
+    best = BestOfN(candidates, timeout=args.timeout, resource_limits=limits, group_limits=group_limits)
     outcome = best(ws)
 
     results_summary = []

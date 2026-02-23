@@ -109,22 +109,27 @@ if outcome.committed:
 
 ### Best-of-N with scoring
 
-Run the same task N times (e.g. with different random seeds or temperatures)
-and commit the highest-scoring success.
+Run N candidates in parallel and commit the highest-scoring success.
 
 Use when quality matters more than speed: code generation where you want
 the cleanest output across multiple temperatures, translation with a BLEU
-scorer picking the best variant, or any task with a reliable quality metric
-where the same prompt can produce varying results.
+scorer picking the best variant, or any task with a reliable quality metric.
+Pairs naturally with the ``n=`` parameter in OpenAI's Chat Completions API
+to generate N variations in a single call, then test each in an isolated
+branch.
 
 ```python
 from branching import BestOfN
 
-def scored_task(path: Path, attempt: int) -> tuple[bool, float]:
-    result = run_agent(workdir=path, seed=attempt)
-    return result.passed, result.quality_score
+def make_candidate(code: str):
+    def candidate(path: Path) -> tuple[bool, float]:
+        (path / "solution.py").write_text(code)
+        passed = run_tests(path)
+        return passed, evaluate_quality(path) if passed else 0.0
+    return candidate
 
-outcome = BestOfN(scored_task, n=5)(ws)
+candidates = [make_candidate(c) for c in generate_solutions(n=5)]
+outcome = BestOfN(candidates)(ws)
 ```
 
 ### Reflexion (retry with feedback)
@@ -217,7 +222,7 @@ outcome = BeamSearch(
 
 ### Tournament (pairwise elimination)
 
-Generate N candidates in parallel, then narrow to one through pairwise
+Run N candidates in parallel, then narrow to one through pairwise
 elimination via a judge function. The convergent dual of Tree of Thoughts:
 starts wide, narrows to one.
 
@@ -229,14 +234,19 @@ any setting where relative ranking is easier than absolute scoring.
 ```python
 from branching import Tournament
 
-def generate_patch(path: Path, index: int) -> bool:
-    return run_agent(workdir=path, seed=index)
+def make_patch(code: str):
+    def candidate(path: Path) -> bool:
+        (path / "fix.patch").write_text(code)
+        return apply_and_test(path)
+    return candidate
+
+candidates = [make_patch(p) for p in generate_patches(n=8)]
 
 def judge(path_a: Path, path_b: Path) -> int:
     # 0 = a wins, 1 = b wins
     return llm_compare(path_a / "diff.patch", path_b / "diff.patch")
 
-outcome = Tournament(generate_patch, n=8, judge=judge)(ws)
+outcome = Tournament(candidates, judge=judge)(ws)
 ```
 
 ### Cascaded speculation (adaptive fan-out)
@@ -349,7 +359,7 @@ from branching import ResourceLimits, BestOfN
 
 limits = ResourceLimits(memory=512 * 1024 * 1024, cpu=0.5)  # 512 MB, 50% CPU
 
-outcome = BestOfN(scored_task, n=5, resource_limits=limits)(ws)
+outcome = BestOfN(candidates, resource_limits=limits)(ws)
 ```
 
 All patterns accept `resource_limits`: `Speculate`, `BestOfN`, `Reflexion`,
