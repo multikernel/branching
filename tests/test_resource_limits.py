@@ -369,9 +369,13 @@ class TestKillScopeRecursive:
         # Create a file (like cgroup.kill) in the child
         (child / "cgroup.kill").write_text("")
 
-        # kill_scope should handle non-empty dirs gracefully (files present)
-        # rmdir will fail if files present, but that's caught by OSError
         kill_scope(root)
+
+        # kill_scope wrote "1" to cgroup.kill before attempting rmdir
+        assert (child / "cgroup.kill").read_text() == "1"
+        # rmdir fails on non-empty dirs; kill_scope catches the OSError
+        assert child.exists()
+        assert root.exists()
 
 
 # ---------------------------------------------------------------
@@ -379,7 +383,7 @@ class TestKillScopeRecursive:
 # ---------------------------------------------------------------
 
 class TestPatternResourceLimitsAcceptance:
-    """Verify all patterns accept resource_limits without error."""
+    """Verify all patterns pass resource_limits through to run_in_process."""
 
     def _make_workspace(self):
         from branching.core.base import FSBackend
@@ -406,49 +410,85 @@ class TestPatternResourceLimitsAcceptance:
             mock.return_value = MockFSBackend
             return Workspace("/tmp/test_ws")
 
-    def test_speculate_accepts_resource_limits(self):
+    def test_speculate_passes_resource_limits(self):
         from branching.agent.speculate import Speculate
         rl = ResourceLimits(memory=512 * 1024 * 1024)
-        spec = Speculate([lambda p: True], resource_limits=rl)
-        assert spec._resource_limits is rl
+        ws = self._make_workspace()
+        captured = []
+        def mock_rip(fn, args, *, workspace, limits, **kw):
+            captured.append(limits)
+            return fn(*args)
+        with patch("branching.process.runner.run_in_process", mock_rip):
+            Speculate([lambda p: True], resource_limits=rl)(ws)
+        assert captured == [rl]
 
-    def test_best_of_n_accepts_resource_limits(self):
+    def test_best_of_n_passes_resource_limits(self):
         from branching.agent.patterns import BestOfN
         rl = ResourceLimits(cpu=0.5)
-        bon = BestOfN([lambda p: (True, 1.0)] * 2, resource_limits=rl)
-        assert bon._resource_limits is rl
+        ws = self._make_workspace()
+        captured = []
+        def mock_rip(fn, args, *, workspace, limits, **kw):
+            captured.append(limits)
+            return fn(*args)
+        with patch("branching.agent.patterns.run_in_process", mock_rip):
+            BestOfN([lambda p: (True, 1.0)] * 2, resource_limits=rl)(ws)
+        assert all(l is rl for l in captured)
 
-    def test_reflexion_accepts_resource_limits(self):
+    def test_reflexion_passes_resource_limits(self):
         from branching.agent.patterns import Reflexion
         rl = ResourceLimits(memory=1024)
-        refl = Reflexion(lambda p, a, f: True, resource_limits=rl)
-        assert refl._resource_limits is rl
+        ws = self._make_workspace()
+        captured = []
+        def mock_rip(fn, args, *, workspace, limits, **kw):
+            captured.append(limits)
+            return fn(*args)
+        with patch("branching.agent.patterns.run_in_process", mock_rip):
+            Reflexion(lambda p, a, f: True, resource_limits=rl)(ws)
+        assert captured == [rl]
 
-    def test_tree_of_thoughts_accepts_resource_limits(self):
+    def test_tree_of_thoughts_passes_resource_limits(self):
         from branching.agent.patterns import TreeOfThoughts
         rl = ResourceLimits(cpu=1.0)
-        tot = TreeOfThoughts([lambda p: True], resource_limits=rl)
-        assert tot._resource_limits is rl
+        ws = self._make_workspace()
+        captured = []
+        def mock_rip(fn, args, *, workspace, limits, **kw):
+            captured.append(limits)
+            return fn(*args)
+        with patch("branching.agent.patterns.run_in_process", mock_rip):
+            TreeOfThoughts([lambda p: True], resource_limits=rl)(ws)
+        assert captured == [rl]
 
-    def test_beam_search_accepts_resource_limits(self):
+    def test_beam_search_passes_resource_limits(self):
         from branching.agent.patterns import BeamSearch
         rl = ResourceLimits(memory=2048, cpu=0.25)
-        bs = BeamSearch(
-            [lambda p: True],
-            expand=lambda p, d: [],
-            resource_limits=rl,
-        )
-        assert bs._resource_limits is rl
+        ws = self._make_workspace()
+        captured = []
+        def mock_rip(fn, args, *, workspace, limits, **kw):
+            captured.append(limits)
+            return fn(*args)
+        with patch("branching.agent.patterns.run_in_process", mock_rip):
+            BeamSearch(
+                [lambda p: True],
+                expand=lambda p, d: [],
+                resource_limits=rl,
+            )(ws)
+        assert captured == [rl]
 
-    def test_tournament_accepts_resource_limits(self):
+    def test_tournament_passes_resource_limits(self):
         from branching.agent.patterns import Tournament
         rl = ResourceLimits(memory=4096)
-        t = Tournament(
-            [lambda p: True] * 2,
-            judge=lambda a, b: 0,
-            resource_limits=rl,
-        )
-        assert t._resource_limits is rl
+        ws = self._make_workspace()
+        captured = []
+        def mock_rip(fn, args, *, workspace, limits, **kw):
+            captured.append(limits)
+            return fn(*args)
+        with patch("branching.agent.patterns.run_in_process", mock_rip):
+            Tournament(
+                [lambda p: True] * 2,
+                judge=lambda a, b: 0,
+                resource_limits=rl,
+            )(ws)
+        assert all(l is rl for l in captured)
 
 
 # ---------------------------------------------------------------
@@ -456,52 +496,131 @@ class TestPatternResourceLimitsAcceptance:
 # ---------------------------------------------------------------
 
 class TestPatternGroupLimitsAcceptance:
-    """Verify all patterns accept and store group_limits."""
+    """Verify all patterns pass group_limits to create_group."""
 
-    def test_speculate_accepts_group_limits(self):
+    def _make_workspace(self):
+        from branching.core.base import FSBackend
+        from branching.core.workspace import Workspace
+
+        class MockFSBackend(FSBackend):
+            @classmethod
+            def fstype(cls):
+                return "mockfs"
+
+            @classmethod
+            def create_branch(cls, name, mountpoint, parent_mount, parent_branch):
+                pass
+
+            @classmethod
+            def commit(cls, mountpoint):
+                pass
+
+            @classmethod
+            def abort(cls, mountpoint):
+                pass
+
+        with patch("branching.core.workspace.detect_fs_for_mount") as mock:
+            mock.return_value = MockFSBackend
+            return Workspace("/tmp/test_ws")
+
+    def test_speculate_passes_group_limits(self):
         from branching.agent.speculate import Speculate
         rl = ResourceLimits(memory=512 * 1024 * 1024)
         gl = ResourceLimits(memory=1024 * 1024 * 1024)
-        spec = Speculate([lambda p: True], resource_limits=rl, group_limits=gl)
-        assert spec._group_limits is gl
+        ws = self._make_workspace()
+        def mock_rip(fn, args, *, workspace, limits, **kw):
+            return fn(*args)
+        with patch("branching.process.runner.run_in_process", mock_rip), \
+             patch("branching.process._cgroup.create_group") as mock_cg, \
+             patch("branching.process._cgroup.kill_scope"):
+            mock_cg.return_value = Path("/tmp/fake_cgroup")
+            Speculate([lambda p: True], resource_limits=rl, group_limits=gl)(ws)
+        mock_cg.assert_called_once()
+        assert mock_cg.call_args.kwargs["limits"] is gl
 
-    def test_best_of_n_accepts_group_limits(self):
+    def test_best_of_n_passes_group_limits(self):
         from branching.agent.patterns import BestOfN
+        rl = ResourceLimits(cpu=0.5)
         gl = ResourceLimits(cpu=2.0)
-        bon = BestOfN([lambda p: (True, 1.0)] * 2, group_limits=gl)
-        assert bon._group_limits is gl
+        ws = self._make_workspace()
+        def mock_rip(fn, args, *, workspace, limits, **kw):
+            return fn(*args)
+        with patch("branching.agent.patterns.run_in_process", mock_rip), \
+             patch("branching.process._cgroup.create_group") as mock_cg, \
+             patch("branching.process._cgroup.kill_scope"):
+            mock_cg.return_value = Path("/tmp/fake_cgroup")
+            BestOfN([lambda p: (True, 1.0)] * 2, resource_limits=rl, group_limits=gl)(ws)
+        mock_cg.assert_called_once()
+        assert mock_cg.call_args.kwargs["limits"] is gl
 
-    def test_reflexion_accepts_group_limits(self):
+    def test_reflexion_passes_group_limits(self):
         from branching.agent.patterns import Reflexion
+        rl = ResourceLimits(memory=1024)
         gl = ResourceLimits(memory=2048)
-        refl = Reflexion(lambda p, a, f: True, group_limits=gl)
-        assert refl._group_limits is gl
+        ws = self._make_workspace()
+        def mock_rip(fn, args, *, workspace, limits, **kw):
+            return fn(*args)
+        with patch("branching.agent.patterns.run_in_process", mock_rip), \
+             patch("branching.process._cgroup.create_group") as mock_cg, \
+             patch("branching.process._cgroup.kill_scope"):
+            mock_cg.return_value = Path("/tmp/fake_cgroup")
+            Reflexion(lambda p, a, f: True, resource_limits=rl, group_limits=gl)(ws)
+        mock_cg.assert_called_once()
+        assert mock_cg.call_args.kwargs["limits"] is gl
 
-    def test_tree_of_thoughts_accepts_group_limits(self):
+    def test_tree_of_thoughts_passes_group_limits(self):
         from branching.agent.patterns import TreeOfThoughts
+        rl = ResourceLimits(cpu=1.0)
         gl = ResourceLimits(cpu=4.0)
-        tot = TreeOfThoughts([lambda p: True], group_limits=gl)
-        assert tot._group_limits is gl
+        ws = self._make_workspace()
+        def mock_rip(fn, args, *, workspace, limits, **kw):
+            return fn(*args)
+        with patch("branching.agent.patterns.run_in_process", mock_rip), \
+             patch("branching.process._cgroup.create_group") as mock_cg, \
+             patch("branching.process._cgroup.kill_scope"):
+            mock_cg.return_value = Path("/tmp/fake_cgroup")
+            TreeOfThoughts([lambda p: True], resource_limits=rl, group_limits=gl)(ws)
+        mock_cg.assert_called_once()
+        assert mock_cg.call_args.kwargs["limits"] is gl
 
-    def test_beam_search_accepts_group_limits(self):
+    def test_beam_search_passes_group_limits(self):
         from branching.agent.patterns import BeamSearch
+        rl = ResourceLimits(memory=2048)
         gl = ResourceLimits(memory=8192)
-        bs = BeamSearch(
-            [lambda p: True],
-            expand=lambda p, d: [],
-            group_limits=gl,
-        )
-        assert bs._group_limits is gl
+        ws = self._make_workspace()
+        def mock_rip(fn, args, *, workspace, limits, **kw):
+            return fn(*args)
+        with patch("branching.agent.patterns.run_in_process", mock_rip), \
+             patch("branching.process._cgroup.create_group") as mock_cg, \
+             patch("branching.process._cgroup.kill_scope"):
+            mock_cg.return_value = Path("/tmp/fake_cgroup")
+            BeamSearch(
+                [lambda p: True],
+                expand=lambda p, d: [],
+                resource_limits=rl, group_limits=gl,
+            )(ws)
+        # First call creates root cgroup with group_limits;
+        # subsequent calls create per-beam intermediate groups.
+        assert mock_cg.call_args_list[0].kwargs["limits"] is gl
 
-    def test_tournament_accepts_group_limits(self):
+    def test_tournament_passes_group_limits(self):
         from branching.agent.patterns import Tournament
+        rl = ResourceLimits(memory=4096)
         gl = ResourceLimits(memory=4096, cpu=2.0)
-        t = Tournament(
-            [lambda p: True] * 2,
-            judge=lambda a, b: 0,
-            group_limits=gl,
-        )
-        assert t._group_limits is gl
+        ws = self._make_workspace()
+        def mock_rip(fn, args, *, workspace, limits, **kw):
+            return fn(*args)
+        with patch("branching.agent.patterns.run_in_process", mock_rip), \
+             patch("branching.process._cgroup.create_group") as mock_cg, \
+             patch("branching.process._cgroup.kill_scope"):
+            mock_cg.return_value = Path("/tmp/fake_cgroup")
+            Tournament(
+                [lambda p: True] * 2,
+                judge=lambda a, b: 0,
+                resource_limits=rl, group_limits=gl,
+            )(ws)
+        mock_cg.assert_called_once()
+        assert mock_cg.call_args.kwargs["limits"] is gl
 
 
 # ---------------------------------------------------------------
@@ -515,12 +634,20 @@ class TestBranchContextLimits:
         ctx = BranchContext(lambda p: None, workspace=Path("/tmp"), limits=rl)
         assert ctx._limits is rl
 
-    def test_create_accepts_limits_kwarg(self):
-        """BranchContext.create() signature accepts limits."""
+    def test_create_passes_limits_to_contexts(self):
+        """BranchContext.create() threads limits through to each context."""
         from branching.process.context import BranchContext
-        import inspect
-        sig = inspect.signature(BranchContext.create)
-        assert "limits" in sig.parameters
+        rl = ResourceLimits(memory=1024)
+        with patch.object(BranchContext, '__enter__', lambda self: self), \
+             patch.object(BranchContext, '__exit__', lambda self, *a: False):
+            with BranchContext.create(
+                targets=[lambda p: None, lambda p: None],
+                workspaces=[Path("/tmp/a"), Path("/tmp/b")],
+                limits=rl,
+            ) as contexts:
+                assert len(contexts) == 2
+                for ctx in contexts:
+                    assert ctx._limits is rl
 
     def test_accepts_parent_cgroup_kwarg(self):
         from branching.process.context import BranchContext
@@ -536,11 +663,18 @@ class TestBranchContextLimits:
         ctx = BranchContext(lambda p: None, workspace=Path("/tmp"))
         assert ctx._parent_cgroup is None
 
-    def test_create_accepts_parent_cgroup(self):
+    def test_create_passes_parent_cgroup_to_contexts(self):
+        """BranchContext.create() threads parent_cgroup through to each context."""
         from branching.process.context import BranchContext
-        import inspect
-        sig = inspect.signature(BranchContext.create)
-        assert "parent_cgroup" in sig.parameters
+        parent = Path("/sys/fs/cgroup/test")
+        with patch.object(BranchContext, '__enter__', lambda self: self), \
+             patch.object(BranchContext, '__exit__', lambda self, *a: False):
+            with BranchContext.create(
+                targets=[lambda p: None],
+                workspaces=[Path("/tmp/a")],
+                parent_cgroup=parent,
+            ) as contexts:
+                assert contexts[0]._parent_cgroup is parent
 
 
 # ---------------------------------------------------------------
@@ -548,11 +682,23 @@ class TestBranchContextLimits:
 # ---------------------------------------------------------------
 
 class TestRunInProcessParentCgroup:
-    def test_signature_has_parent_cgroup(self):
-        from branching.process.runner import run_in_process
-        import inspect
-        sig = inspect.signature(run_in_process)
-        assert "parent_cgroup" in sig.parameters
+    def test_parent_cgroup_passed_to_context(self):
+        """run_in_process passes parent_cgroup through to BranchContext."""
+        from branching.process import runner
+        from branching.exceptions import ProcessBranchError
+        parent = Path("/sys/fs/cgroup/test")
+        with patch.object(runner, 'BranchContext') as MockBC:
+            mock_ctx = MockBC.return_value
+            mock_ctx.__enter__ = MagicMock(return_value=mock_ctx)
+            mock_ctx.__exit__ = MagicMock(return_value=False)
+            mock_ctx.cgroup_scope = None
+            mock_ctx.wait = MagicMock()
+            with pytest.raises(ProcessBranchError):
+                runner.run_in_process(
+                    lambda: 42, (), Path("/tmp"),
+                    parent_cgroup=parent,
+                )
+        assert MockBC.call_args.kwargs["parent_cgroup"] is parent
 
 
 # ---------------------------------------------------------------
@@ -728,12 +874,13 @@ class TestBranchContextCgroupScope:
         ctx = BranchContext(lambda p: None, workspace=Path("/tmp"))
         assert ctx.cgroup_scope is None
 
-    def test_property_exists(self):
+    def test_cgroup_scope_reflects_internal_state(self):
+        """cgroup_scope returns None initially, then the scope path once set."""
         from branching.process.context import BranchContext
-        assert isinstance(
-            type(ctx := BranchContext(lambda p: None, workspace=Path("/tmp"))).cgroup_scope,
-            property,
-        )
+        ctx = BranchContext(lambda p: None, workspace=Path("/tmp"))
+        assert ctx.cgroup_scope is None
+        ctx._cgroup_scope = Path("/sys/fs/cgroup/test.scope")
+        assert ctx.cgroup_scope == Path("/sys/fs/cgroup/test.scope")
 
 
 # ---------------------------------------------------------------
@@ -741,17 +888,38 @@ class TestBranchContextCgroupScope:
 # ---------------------------------------------------------------
 
 class TestRunInProcessScopeCallback:
-    def test_signature_has_scope_callback(self):
-        from branching.process.runner import run_in_process
-        import inspect
-        sig = inspect.signature(run_in_process)
-        assert "scope_callback" in sig.parameters
+    def test_scope_callback_invoked_with_scope(self):
+        """run_in_process invokes scope_callback with the cgroup scope path."""
+        from branching.process import runner
+        from branching.exceptions import ProcessBranchError
+        scope_path = Path("/sys/fs/cgroup/test-scope")
+        callback = MagicMock()
+        with patch.object(runner, 'BranchContext') as MockBC:
+            mock_ctx = MockBC.return_value
+            mock_ctx.__enter__ = MagicMock(return_value=mock_ctx)
+            mock_ctx.__exit__ = MagicMock(return_value=False)
+            mock_ctx.cgroup_scope = scope_path
+            mock_ctx.wait = MagicMock()
+            with pytest.raises(ProcessBranchError):
+                runner.run_in_process(
+                    lambda: 42, (), Path("/tmp"),
+                    scope_callback=callback,
+                )
+        callback.assert_called_once_with(scope_path)
 
-    def test_scope_callback_default_none(self):
-        from branching.process.runner import run_in_process
-        import inspect
-        sig = inspect.signature(run_in_process)
-        assert sig.parameters["scope_callback"].default is None
+    def test_scope_callback_not_invoked_when_omitted(self):
+        """run_in_process with default scope_callback=None handles cgroup_scope gracefully."""
+        from branching.process import runner
+        from branching.exceptions import ProcessBranchError
+        with patch.object(runner, 'BranchContext') as MockBC:
+            mock_ctx = MockBC.return_value
+            mock_ctx.__enter__ = MagicMock(return_value=mock_ctx)
+            mock_ctx.__exit__ = MagicMock(return_value=False)
+            mock_ctx.cgroup_scope = Path("/some/scope")
+            mock_ctx.wait = MagicMock()
+            with pytest.raises(ProcessBranchError):
+                runner.run_in_process(lambda: 42, (), Path("/tmp"))
+        # No error raised — scope_callback=None guard works correctly
 
 
 # ---------------------------------------------------------------
