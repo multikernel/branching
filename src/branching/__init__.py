@@ -72,7 +72,7 @@ __all__ = [
     "MemoryBranchError",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Lazy imports — each layer loads only when first accessed.
 _LAZY_IMPORTS = {
