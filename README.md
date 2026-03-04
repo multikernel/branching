@@ -467,17 +467,12 @@ branching status --json
 
 ## How it works
 
-BranchContext uses copy-on-write filesystems to create instant, zero-cost
-branches of your workspace. Two backends are supported, auto-detected at
-runtime:
+BranchContext uses [BranchFS](https://github.com/multikernel/branchfs), a
+copy-on-write FUSE filesystem, to create instant, zero-cost branches of your
+workspace. Branches are virtual paths within a single mount, with
+first-winner-commit semantics.
 
-| Backend | How branches work |
-|---|---|
-| **[BranchFS](https://github.com/multikernel/branchfs)** (FUSE) | Single mount; branches are virtual paths within it. First-winner-commit semantics. |
-| **[DaxFS](https://github.com/multikernel/daxfs)** (kernel) | Separate mount per branch. Fastest option for DAX-capable storage. |
-
-You just create a `Workspace` pointed at a mounted path - the backend is
-detected automatically.
+You just create a `Workspace` pointed at a mounted BranchFS path.
 
 Process isolation (`BranchContext`) uses unprivileged Linux user namespaces
 to give each child its own filesystem view. No root required - works on any

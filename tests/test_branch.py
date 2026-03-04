@@ -142,7 +142,7 @@ def test_child_branch():
     child = b.branch("l2")
     assert child.name == "l2"
     assert child.branch_path == "/main/l1/l2"
-    assert child.path == Path("/mnt/main_l1_l2")
+    assert child.path == Path("/mnt/main_l1")
 
 
 def test_repr():

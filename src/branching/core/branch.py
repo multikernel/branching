@@ -59,8 +59,8 @@ class Branch:
             parent_branch: Parent's branch path (e.g., '/main' or '/main/L1')
             on_success: Action on clean exit - "commit" or None
             on_error: Action on exception - "abort" or None
-            mount_root: Filesystem mount root (for single-mount backends where
-                branch virtual paths are always relative to root).
+            mount_root: Filesystem mount root (branch virtual paths are
+                always relative to this root).
         """
         self._fs = fs
         self._name = name
@@ -107,13 +107,7 @@ class Branch:
         Returns:
             New Branch instance
         """
-        if self._fs.single_mount():
-            # Single-mount backends: mountpoint is always the mount root
-            # (create_branch will return the actual virtual path)
-            child_mount = self._mount_root
-        else:
-            # Mount-per-branch backends: create sibling directory
-            child_mount = self._path.parent / f"{self._path.name}_{name}"
+        child_mount = self._mount_root
         return Branch(
             fs=self._fs,
             name=name,
@@ -127,10 +121,7 @@ class Branch:
 
     def commit(self) -> None:
         """
-        Commit the branch.
-
-        For DaxFS: commits the entire branch chain to main.
-        For BranchFS: commits the leaf branch to its parent.
+        Commit the branch (merges changes to parent).
         """
         if self._finished:
             return
@@ -139,10 +130,7 @@ class Branch:
 
     def abort(self) -> None:
         """
-        Abort the branch.
-
-        For DaxFS: aborts the entire branch chain back to main.
-        For BranchFS: aborts the leaf branch, returning to parent.
+        Abort the branch (rolls back to parent).
         """
         if self._finished:
             return

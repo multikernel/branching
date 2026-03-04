@@ -54,20 +54,9 @@ class Workspace:
         """Detected filesystem type name."""
         return self._fs.fstype()
 
-    @property
-    def single_mount(self) -> bool:
-        """Whether the backend uses stack-based branching on a single mount.
-
-        When True, branches are serialized (no concurrent siblings).
-        """
-        return self._fs.single_mount()
-
     def _generate_mountpoint(self, name: str) -> Path:
         """
         Generate a mountpoint path for a branch.
-
-        Backend-aware: single-mount backends (BranchFS) reuse the mount root;
-        mount-per-branch backends (DaxFS) create a sibling directory.
 
         Args:
             name: Branch name
@@ -75,12 +64,7 @@ class Workspace:
         Returns:
             Path for the new branch mount
         """
-        if self._fs.single_mount():
-            # BranchFS: view switches in-place, same mount root
-            return self._mount_root
-        else:
-            # DaxFS: each branch gets its own mount
-            return self._path.parent / f"{self._path.name}_{name}"
+        return self._mount_root
 
     def branch(
         self,

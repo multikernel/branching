@@ -19,7 +19,7 @@ def register(fstype: str, fs_class: Type[FSBackend]) -> None:
     Called by filesystem modules during import to register themselves.
 
     Args:
-        fstype: Filesystem type name (e.g., 'daxfs', 'fuse.branchfs')
+        fstype: Filesystem type name (e.g., 'fuse.branchfs')
         fs_class: FSBackend subclass that handles this filesystem
     """
     _registry[fstype] = fs_class
@@ -91,11 +91,6 @@ def _ensure_implementations_loaded() -> None:
 
     Imports backend modules which register themselves on import.
     """
-    if "daxfs" not in _registry:
-        try:
-            from ..fs import daxfs as _  # noqa: F401
-        except ImportError:
-            pass
     if "fuse.branchfs" not in _registry:
         try:
             from ..fs import branchfs as _  # noqa: F401

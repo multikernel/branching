@@ -6,19 +6,17 @@ the winner, and abort the rest — instantly.
 
 ## Workspace
 
-A workspace is a directory backed by a copy-on-write filesystem (branchfs
-or daxfs). All branching operations happen within a workspace.
+A workspace is a directory backed by [BranchFS](https://github.com/multikernel/branchfs),
+a copy-on-write FUSE filesystem. All branching operations happen within a workspace.
 
-**Prerequisite:** The workspace must be mounted before use. Two backends
-are supported, auto-detected at runtime:
+**Prerequisite:** The workspace must be mounted before use:
 
-| Backend | Mount |
-|---------|-------|
-| [BranchFS](https://github.com/multikernel/branchfs) (FUSE) | `branchfs /mnt/workspace` |
-| [DaxFS](https://github.com/multikernel/daxfs) (kernel) | `mount -t daxfs <device> /mnt/workspace` |
+```bash
+branchfs /mnt/workspace
+```
 
 The CLI auto-detects the workspace from your current directory if you are
-inside a branchfs/daxfs mount. Otherwise pass `-w /mnt/workspace`.
+inside a branchfs mount. Otherwise pass `-w /mnt/workspace`.
 
 ## CLI
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Simple branch example — speculative execution with auto-commit/abort.
 
-Requires a mounted branchfs or daxfs filesystem.
+Requires a mounted branchfs filesystem.
 
 Usage:
     python simple_branch.py /mnt/workspace

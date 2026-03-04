@@ -67,10 +67,6 @@ class BranchFSBackend(FSBackend):
         return "fuse.branchfs"
 
     @classmethod
-    def single_mount(cls) -> bool:
-        return True
-
-    @classmethod
     def create_branch(
         cls, name: str, mountpoint: Path, parent_mount: Path, parent_branch: str
     ) -> Optional[Path]:

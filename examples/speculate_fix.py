@@ -299,7 +299,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Fix a buggy module: one LLM call, N branches.",
     )
-    parser.add_argument("workspace", help="BranchFS/DaxFS workspace path")
+    parser.add_argument("workspace", help="BranchFS workspace path")
     parser.add_argument("--model", default="gpt-4o-mini",
                         help="LLM model name (default: gpt-4o-mini)")
     parser.add_argument("-n", type=int, default=4,

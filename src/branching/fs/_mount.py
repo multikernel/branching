@@ -109,30 +109,3 @@ def find_mount(mountpoint: Path, fstype: Optional[str] = None) -> Optional[Mount
     return None
 
 
-def find_mounts_by_type(fstype: str) -> List[MountInfo]:
-    """
-    Find all mounts of a specific filesystem type.
-
-    Args:
-        fstype: Filesystem type name (e.g., 'daxfs')
-
-    Returns:
-        List of MountInfo for matching mounts
-    """
-    return [m for m in parse_mounts() if m.fstype == fstype]
-
-
-def find_any_mount(fstype: str) -> Optional[MountInfo]:
-    """
-    Find any mount of the specified filesystem type.
-
-    Useful for getting backing store info from an existing mount.
-
-    Args:
-        fstype: Filesystem type name
-
-    Returns:
-        First matching MountInfo or None
-    """
-    mounts = find_mounts_by_type(fstype)
-    return mounts[0] if mounts else None

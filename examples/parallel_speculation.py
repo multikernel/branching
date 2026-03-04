@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Parallel speculation example — first successful fix wins.
 
-Requires a mounted branchfs or daxfs filesystem.
+Requires a mounted branchfs filesystem.
 
 Usage:
     python parallel_speculation.py /mnt/workspace

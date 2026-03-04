@@ -2,7 +2,7 @@
 """
 BranchContext - Unified branching for speculative execution.
 
-Supports filesystem branching (BranchFS FUSE, DaxFS), process branching
+Supports filesystem branching (BranchFS FUSE), process branching
 (fork + namespaces), and AI agent integration patterns (speculation,
 best-of-N, reflexion, tree-of-thoughts).
 

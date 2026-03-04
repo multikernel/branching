@@ -28,7 +28,7 @@ class FSBackend(ABC):
         Return filesystem type name as it appears in /proc/mounts.
 
         Returns:
-            Filesystem type string (e.g., 'daxfs', 'fuse.branchfs')
+            Filesystem type string (e.g., 'fuse.branchfs')
         """
         pass
 
@@ -80,12 +80,3 @@ class FSBackend(ABC):
         """
         pass
 
-    @classmethod
-    def single_mount(cls) -> bool:
-        """Whether this backend uses a single mount (view switches in-place).
-
-        Returns True for ioctl-based backends like BranchFS where branching
-        happens within a single mount. Returns False for mount-per-branch
-        backends like DaxFS.
-        """
-        return False

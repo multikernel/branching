@@ -1068,14 +1068,6 @@ class TestSpeculationResult:
         assert not o.committed
 
 
-class SingleMountMockFSBackend(MockFSBackend):
-    """Mock FS backend that uses single-mount semantics (like BranchFS)."""
-
-    @classmethod
-    def single_mount(cls) -> bool:
-        return True
-
-
 class TestSubBranching:
     """Workspace(path) works when path is inside an existing mount."""
 
@@ -1085,7 +1077,7 @@ class TestSubBranching:
         branch_path = "/mnt/ws/@uuid0"
 
         with patch("branching.core.workspace.detect_fs_for_mount") as mock_detect:
-            mock_detect.return_value = (SingleMountMockFSBackend, Path(mount_root))
+            mock_detect.return_value = (MockFSBackend, Path(mount_root))
             ws = Workspace(branch_path)
 
         # Public API: path reflects where the candidate works
@@ -1096,19 +1088,19 @@ class TestSubBranching:
         assert b.name == "sub"
         # create_branch receives the mount root, not the branch virtual path
         with b:
-            assert SingleMountMockFSBackend._branches_created[-1] == "sub"
+            assert MockFSBackend._branches_created[-1] == "sub"
 
     def test_workspace_at_mount_root_unchanged(self):
         """Normal usage (path == mount root) behaves the same as before."""
         with patch("branching.core.workspace.detect_fs_for_mount") as mock_detect:
-            mock_detect.return_value = (SingleMountMockFSBackend, Path("/mnt/ws"))
+            mock_detect.return_value = (MockFSBackend, Path("/mnt/ws"))
             ws = Workspace("/mnt/ws")
         assert ws.path == Path("/mnt/ws")
 
         b = ws.branch("feat")
         assert b.name == "feat"
         with b:
-            assert SingleMountMockFSBackend._branches_created[-1] == "feat"
+            assert MockFSBackend._branches_created[-1] == "feat"
 
     def test_sub_branch_speculate(self):
         """End-to-end: candidate sub-branches via Workspace and Speculate."""
@@ -1116,7 +1108,7 @@ class TestSubBranching:
         branch_path = "/mnt/ws/@uuid0"
 
         with patch("branching.core.workspace.detect_fs_for_mount") as mock_detect:
-            mock_detect.return_value = (SingleMountMockFSBackend, Path(mount_root))
+            mock_detect.return_value = (MockFSBackend, Path(mount_root))
             ws = Workspace(branch_path)
 
         def candidate(path: Path) -> bool:

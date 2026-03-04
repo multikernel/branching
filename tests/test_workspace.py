@@ -27,16 +27,6 @@ class MockFSBackend(FSBackend):
         pass
 
 
-class SingleMountMockFSBackend(MockFSBackend):
-    @classmethod
-    def fstype(cls) -> str:
-        return "fuse.mock"
-
-    @classmethod
-    def single_mount(cls) -> bool:
-        return True
-
-
 @patch("branching.core.workspace.detect_fs_for_mount")
 def test_workspace_creation(mock_detect):
     mock_detect.return_value = (MockFSBackend, Path("/tmp/test_ws"))
@@ -50,17 +40,8 @@ def test_workspace_branch_mountpoint_generation(mock_detect):
     mock_detect.return_value = (MockFSBackend, Path("/tmp/test_ws"))
     ws = Workspace("/tmp/test_ws")
     b = ws.branch("feat")
-    # Mount-per-branch: sibling directory
-    assert b.path == ws.path.parent / f"{ws.path.name}_feat"
-
-
-@patch("branching.core.workspace.detect_fs_for_mount")
-def test_workspace_single_mount_branch(mock_detect):
-    mock_detect.return_value = (SingleMountMockFSBackend, Path("/tmp/test_ws"))
-    ws = Workspace("/tmp/test_ws")
-    b = ws.branch("feat")
-    # Single mount: same path
-    assert b.path == ws.path
+    # Branch path is mount root
+    assert b.path == Path("/tmp/test_ws")
 
 
 @patch("branching.core.workspace.detect_fs_for_mount")

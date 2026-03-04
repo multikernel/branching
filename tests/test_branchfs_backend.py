@@ -17,10 +17,6 @@ def test_fstype():
     assert BranchFSBackend.fstype() == "fuse.branchfs"
 
 
-def test_single_mount():
-    assert BranchFSBackend.single_mount() is True
-
-
 @patch("branching.fs.branchfs.os.open", return_value=3)
 @patch("branching.fs.branchfs.os.close")
 @patch("branching.fs.branchfs.fcntl.ioctl")
