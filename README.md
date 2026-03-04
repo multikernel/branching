@@ -153,6 +153,27 @@ candidates = [make_test(c.message.content) for c in resp.choices]
 outcome = BestOfN(candidates, scores=logprob_scores)(ws)
 ```
 
+#### RL training rollouts
+
+Pass ``commit=False`` to collect scores from all candidates without
+modifying the workspace. Every branch runs to completion and aborts --
+the base stays pristine for the next batch. This gives you cheap,
+isolated rollout environments for policy gradient methods like GRPO.
+
+```python
+from branching import Workspace, BestOfN
+
+ws = Workspace("/mnt/workspace")
+
+for prompt in training_batch:
+    candidates = [make_candidate(prompt) for _ in range(N)]
+    outcome = BestOfN(candidates, commit=False)(ws)
+
+    # All N results available -- extract (success, score) for training
+    rewards = [(r.success, r.score) for r in outcome.all_results]
+    trainer.step(prompt, rewards)
+```
+
 ### Reflexion (retry with feedback)
 
 Run a task, and if it fails, generate a critique and feed it back into the

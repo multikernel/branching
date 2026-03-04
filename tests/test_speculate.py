@@ -185,6 +185,23 @@ class TestBestOfN:
         assert len(MockFSBackend._commits) == 1
         assert len(MockFSBackend._aborts) == 2
 
+    def test_commit_false_aborts_all(self):
+        """commit=False aborts all branches and returns results."""
+        ws = _make_workspace()
+
+        candidates = [
+            lambda p, s=s: (True, float(s)) for s in range(3)
+        ]
+
+        outcome = BestOfN(candidates, commit=False)(ws)
+        assert not outcome.committed
+        assert outcome.winner.branch_index == 2  # best still identified
+        assert outcome.winner.score == 2.0
+        assert len(outcome.all_results) == 3
+        # All aborted, none committed
+        assert len(MockFSBackend._commits) == 0
+        assert len(MockFSBackend._aborts) == 3
+
     def test_runs_in_parallel(self):
         """Verify candidates actually run concurrently."""
         import time

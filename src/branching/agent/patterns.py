@@ -25,6 +25,11 @@ class BestOfN:
     finishing. The main thread picks the winner based on score, then
     signals each thread to commit (winner) or abort (losers).
 
+    Pass ``commit=False`` to abort all branches and return results
+    without modifying the workspace. Useful for RL training rollouts
+    where you need scores from every candidate but don't want to
+    commit any of them.
+
     Each candidate callable receives (path,) and returns ``bool`` or
     ``(success: bool, score: float)``.  A bare ``bool`` defaults to
     score 1.0/0.0 unless overridden by *scores* or *evaluate*.
@@ -50,6 +55,7 @@ class BestOfN:
         timeout: float | None = None,
         resource_limits: ResourceLimits | None = None,
         group_limits: ResourceLimits | None = None,
+        commit: bool = True,
     ):
         self._candidates = list(candidates)
         self._scores = list(scores) if scores is not None else None
@@ -57,6 +63,7 @@ class BestOfN:
         self._timeout = timeout
         self._resource_limits = resource_limits
         self._group_limits = group_limits
+        self._commit = commit
 
     def _score(self, ret, path, index):
         """Parse candidate return and apply optional evaluator."""
@@ -173,7 +180,7 @@ class BestOfN:
                     best_score = r.score
                     best_idx = i
 
-            if best_idx is not None:
+            if best_idx is not None and self._commit:
                 decisions[best_idx] = "commit"
 
             # Kill still-running tasks (only useful when timeout left
@@ -189,7 +196,7 @@ class BestOfN:
             for f in futures:
                 f.result()
 
-        committed = best_idx is not None
+        committed = best_idx is not None and self._commit
         winner = results[best_idx] if best_idx is not None else None
         all_results = [
             r if r is not None else SpeculationResult(branch_index=i, success=False)
