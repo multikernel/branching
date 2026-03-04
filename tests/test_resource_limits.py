@@ -407,7 +407,7 @@ class TestPatternResourceLimitsAcceptance:
                 pass
 
         with patch("branching.core.workspace.detect_fs_for_mount") as mock:
-            mock.return_value = MockFSBackend
+            mock.return_value = (MockFSBackend, Path("/tmp/test_ws"))
             return Workspace("/tmp/test_ws")
 
     def test_speculate_passes_resource_limits(self):
@@ -520,7 +520,7 @@ class TestPatternGroupLimitsAcceptance:
                 pass
 
         with patch("branching.core.workspace.detect_fs_for_mount") as mock:
-            mock.return_value = MockFSBackend
+            mock.return_value = (MockFSBackend, Path("/tmp/test_ws"))
             return Workspace("/tmp/test_ws")
 
     def test_speculate_passes_group_limits(self):

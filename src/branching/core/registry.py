@@ -38,15 +38,15 @@ def get_fs(fstype: str) -> Optional[Type[FSBackend]]:
     return _registry.get(fstype)
 
 
-def detect_fs_for_mount(path: Path) -> Type[FSBackend]:
+def detect_fs_for_mount(path: Path) -> tuple[Type[FSBackend], Path]:
     """
     Auto-detect filesystem type for a mountpoint and return its implementation.
 
     Args:
-        path: Path to mounted filesystem
+        path: Path to mounted filesystem (may be inside a mount)
 
     Returns:
-        FSBackend subclass for the detected filesystem
+        Tuple of (FSBackend subclass, resolved mount root path)
 
     Raises:
         BranchingError: If no mount found or filesystem type not supported
@@ -77,7 +77,7 @@ def detect_fs_for_mount(path: Path) -> Type[FSBackend]:
             f"Supported types: {', '.join(_registry.keys()) or 'none'}"
         )
 
-    return fs_class
+    return fs_class, mount_info.mountpoint.resolve()
 
 
 def list_supported() -> list[str]:

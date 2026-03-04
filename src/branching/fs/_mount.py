@@ -75,20 +75,37 @@ def parse_mounts(path: str = PROC_MOUNTS) -> List[MountInfo]:
 
 def find_mount(mountpoint: Path, fstype: Optional[str] = None) -> Optional[MountInfo]:
     """
-    Find mount info for a specific mountpoint.
+    Find mount info for the nearest enclosing mountpoint.
+
+    Walks up from *mountpoint* toward the root, returning the first
+    (nearest) mount that matches.  This lets callers pass a path
+    *inside* a mount (e.g. a branch virtual path) and still find the
+    underlying filesystem.
 
     Args:
-        mountpoint: Path to the mountpoint
+        mountpoint: Path to look up (exact mountpoint or path inside one)
         fstype: Optional filesystem type filter
 
     Returns:
         MountInfo if found, None otherwise
     """
     mountpoint = mountpoint.resolve()
-    for mount in parse_mounts():
-        if mount.mountpoint.resolve() == mountpoint:
-            if fstype is None or mount.fstype == fstype:
-                return mount
+    mounts = parse_mounts()
+    # Build map: resolved mountpoint → MountInfo (last wins for overlays)
+    mount_map: Dict[Path, MountInfo] = {}
+    for m in mounts:
+        mp = m.mountpoint.resolve()
+        if fstype is None or m.fstype == fstype:
+            mount_map[mp] = m
+    # Walk up from path to root, return nearest enclosing mount
+    path = mountpoint
+    while True:
+        if path in mount_map:
+            return mount_map[path]
+        parent = path.parent
+        if parent == path:
+            break
+        path = parent
     return None
 
 

@@ -57,10 +57,10 @@ def reset_mock():
     MockFSBackend.reset()
 
 
-def _make_workspace():
+def _make_workspace(path="/tmp/test_ws"):
     with patch("branching.core.workspace.detect_fs_for_mount") as mock_detect:
-        mock_detect.return_value = MockFSBackend
-        return Workspace("/tmp/test_ws")
+        mock_detect.return_value = (MockFSBackend, Path(path))
+        return Workspace(path)
 
 
 class TestSpeculate:
@@ -1066,3 +1066,63 @@ class TestSpeculationResult:
         assert o.winner is None
         assert o.all_results == []
         assert not o.committed
+
+
+class SingleMountMockFSBackend(MockFSBackend):
+    """Mock FS backend that uses single-mount semantics (like BranchFS)."""
+
+    @classmethod
+    def single_mount(cls) -> bool:
+        return True
+
+
+class TestSubBranching:
+    """Workspace(path) works when path is inside an existing mount."""
+
+    def test_workspace_from_branch_path(self):
+        """Candidate constructs Workspace(branch_path) and sub-branches."""
+        mount_root = "/mnt/ws"
+        branch_path = "/mnt/ws/@uuid0"
+
+        with patch("branching.core.workspace.detect_fs_for_mount") as mock_detect:
+            mock_detect.return_value = (SingleMountMockFSBackend, Path(mount_root))
+            ws = Workspace(branch_path)
+
+        # Public API: path reflects where the candidate works
+        assert ws.path == Path(branch_path)
+
+        # Sub-branching works and creates branches on the real mount
+        b = ws.branch("sub")
+        assert b.name == "sub"
+        # create_branch receives the mount root, not the branch virtual path
+        with b:
+            assert SingleMountMockFSBackend._branches_created[-1] == "sub"
+
+    def test_workspace_at_mount_root_unchanged(self):
+        """Normal usage (path == mount root) behaves the same as before."""
+        with patch("branching.core.workspace.detect_fs_for_mount") as mock_detect:
+            mock_detect.return_value = (SingleMountMockFSBackend, Path("/mnt/ws"))
+            ws = Workspace("/mnt/ws")
+        assert ws.path == Path("/mnt/ws")
+
+        b = ws.branch("feat")
+        assert b.name == "feat"
+        with b:
+            assert SingleMountMockFSBackend._branches_created[-1] == "feat"
+
+    def test_sub_branch_speculate(self):
+        """End-to-end: candidate sub-branches via Workspace and Speculate."""
+        mount_root = "/mnt/ws"
+        branch_path = "/mnt/ws/@uuid0"
+
+        with patch("branching.core.workspace.detect_fs_for_mount") as mock_detect:
+            mock_detect.return_value = (SingleMountMockFSBackend, Path(mount_root))
+            ws = Workspace(branch_path)
+
+        def candidate(path: Path) -> bool:
+            return True
+
+        spec = Speculate([candidate], first_wins=True)
+        outcome = spec(ws)
+        assert outcome.committed
+        assert outcome.winner.success

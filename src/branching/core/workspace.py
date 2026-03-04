@@ -42,7 +42,7 @@ class Workspace:
             BranchingError: If no mount found or filesystem not supported
         """
         self._path = Path(path).resolve()
-        self._fs = detect_fs_for_mount(self._path)
+        self._fs, self._mount_root = detect_fs_for_mount(self._path)
 
     @property
     def path(self) -> Path:
@@ -77,7 +77,7 @@ class Workspace:
         """
         if self._fs.single_mount():
             # BranchFS: view switches in-place, same mount root
-            return self._path
+            return self._mount_root
         else:
             # DaxFS: each branch gets its own mount
             return self._path.parent / f"{self._path.name}_{name}"
@@ -108,7 +108,7 @@ class Workspace:
             parent_branch="/main",
             on_success=on_success,
             on_error=on_error,
-            mount_root=self._path,
+            mount_root=self._mount_root,
         )
 
     def __repr__(self) -> str:
