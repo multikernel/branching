@@ -16,7 +16,13 @@ import uuid
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence, TYPE_CHECKING
 
-from ..exceptions import ForkError, ProcessBranchError
+from ..exceptions import ForkError, MemoryProtectError, ProcessBranchError
+from ..memory._mprotect import (
+    MemoryRegion,
+    PROT_READ,
+    PROT_WRITE,
+    mprotect as _mprotect,
+)
 from . import _cgroup
 from ._namespace import setup_user_ns, bind_mount
 
@@ -43,6 +49,7 @@ class BranchContext:
         close_fds: bool = False,
         limits: ResourceLimits | None = None,
         parent_cgroup: Path | None = None,
+        protected_regions: Sequence[tuple[int, int]] | None = None,
     ):
         """
         Args:
@@ -56,6 +63,9 @@ class BranchContext:
             parent_cgroup: Optional parent cgroup directory.  When given,
                 the child's scope is created under this directory instead
                 of the process's own cgroup, enabling hierarchical nesting.
+            protected_regions: Optional list of (addr, size) tuples.
+                After fork, these regions are marked read-only in the
+                parent via mprotect(2) to enforce the branch invariant.
         """
         self._target = target
         self._workspace = workspace
@@ -63,9 +73,11 @@ class BranchContext:
         self._close_fds = close_fds
         self._limits = limits
         self._parent_cgroup = parent_cgroup
+        self._protected_regions = protected_regions
         self._pid: Optional[int] = None
         self._exited = False
         self._cgroup_scope: Optional[Path] = None
+        self._memory_regions: list[MemoryRegion] = []
 
     @property
     def pid(self) -> int:
@@ -91,6 +103,9 @@ class BranchContext:
     def wait(self, timeout: Optional[float] = None) -> None:
         """Wait for the child process to exit.
 
+        On completion (success or failure), restores write access to any
+        protected memory regions so the parent can proceed.
+
         Args:
             timeout: Maximum seconds to wait (None = wait forever).
 
@@ -99,6 +114,7 @@ class BranchContext:
             TimeoutError: If the child doesn't exit within timeout.
         """
         exit_code = self._wait_raw(timeout)
+        self._restore_memory_regions()
         if exit_code != 0:
             raise ProcessBranchError(
                 f"Child {self._pid} exited with status {exit_code}"
@@ -132,11 +148,14 @@ class BranchContext:
     def abort(self, timeout: float = 5.0) -> None:
         """Abort the child and all its descendants.
 
-        Uses both cgroup kill (catches escapees) and killpg (POSIX standard).
-        Escalates SIGTERM -> SIGKILL after timeout.
+        Restores write access to protected memory regions, then kills the
+        child. Uses both cgroup kill (catches escapees) and killpg (POSIX
+        standard). Escalates SIGTERM -> SIGKILL after timeout.
         """
         if self._pid is None or self._exited:
             return
+
+        self._restore_memory_regions()
 
         # Cgroup kill — catches descendants that escaped the process group
         if self._cgroup_scope is not None:
@@ -171,6 +190,12 @@ class BranchContext:
 
         self._reap()
         self._exited = True
+
+    def _restore_memory_regions(self) -> None:
+        """Restore write access to all protected memory regions."""
+        for region in self._memory_regions:
+            _mprotect(region.addr, region.size, region.original_prot)
+        self._memory_regions.clear()
 
     def _reap(self) -> None:
         """Reap the child process (non-blocking, best-effort)."""
@@ -243,10 +268,25 @@ class BranchContext:
                 except OSError:
                     pass  # Best-effort
 
+            # Protect registered memory regions in the parent
+            if self._protected_regions:
+                for addr, size in self._protected_regions:
+                    region = MemoryRegion(
+                        addr=addr,
+                        size=size,
+                        original_prot=PROT_READ | PROT_WRITE,
+                    )
+                    _mprotect(addr, size, PROT_READ)
+                    self._memory_regions.append(region)
+
             return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         self.abort()
+
+        # If abort() was a no-op (child already waited/exited), ensure
+        # regions are still restored.
+        self._restore_memory_regions()
 
         # Clean up private mount dir (best-effort)
         try:
@@ -266,6 +306,7 @@ class BranchContext:
         close_fds: bool = False,
         limits: ResourceLimits | None = None,
         parent_cgroup: Path | None = None,
+        protected_regions: Sequence[tuple[int, int]] | None = None,
     ) -> Iterator[list["BranchContext"]]:
         """Create N branch contexts, mirroring branch(BR_CREATE, n_branches=N).
 
@@ -278,6 +319,8 @@ class BranchContext:
             close_fds: BR_CLOSE_FDS — close inherited fds in children.
             limits: Optional resource limits applied via cgroup v2.
             parent_cgroup: Optional parent cgroup for hierarchical nesting.
+            protected_regions: Optional list of (addr, size) tuples to
+                mark read-only in the parent after each fork.
 
         Yields:
             List of entered BranchContext instances (already forked).
@@ -291,6 +334,7 @@ class BranchContext:
                 ctx = BranchContext(
                     target, workspace, isolate=isolate, close_fds=close_fds,
                     limits=limits, parent_cgroup=parent_cgroup,
+                    protected_regions=protected_regions,
                 )
                 ctx.__enter__()
                 contexts.append(ctx)

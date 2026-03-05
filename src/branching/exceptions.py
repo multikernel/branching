@@ -72,3 +72,9 @@ class MemoryBranchError(BranchingError):
     """Memory branching operation failed."""
 
     pass
+
+
+class MemoryProtectError(MemoryBranchError):
+    """mprotect() failed on a registered memory region."""
+
+    pass
