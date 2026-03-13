@@ -3,8 +3,8 @@
 BranchContext - Unified branching for speculative execution.
 
 Supports filesystem branching (BranchFS FUSE), process branching
-(fork + namespaces), and AI agent integration patterns (speculation,
-best-of-N, reflexion, tree-of-thoughts).
+(fork + Landlock + BPF LSM), and AI agent integration patterns
+(speculation, best-of-N, reflexion, tree-of-thoughts).
 
 Layers are loaded lazily — importing only what you need avoids pulling
 in unrelated dependencies:
@@ -35,7 +35,6 @@ from .exceptions import (
     MountError,
     ProcessBranchError,
     ForkError,
-    NamespaceError,
     MemoryBranchError,
 )
 
@@ -68,7 +67,6 @@ __all__ = [
     "MountError",
     "ProcessBranchError",
     "ForkError",
-    "NamespaceError",
     "MemoryBranchError",
 ]
 

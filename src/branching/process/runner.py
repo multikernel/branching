@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared helper: run a callable in a forked child with optional cgroup limits."""
+"""Shared helper: run a callable in a forked child with optional resource limits."""
 
 from __future__ import annotations
 
@@ -18,27 +18,26 @@ def run_in_process(
     args: tuple,
     workspace: Path,
     *,
+    mount_root: Path | None = None,
     limits: ResourceLimits | None = None,
     timeout: float | None = None,
-    parent_cgroup: Path | None = None,
-    scope_callback: Callable[[Path], None] | None = None,
+    pid_callback: Callable[[int], None] | None = None,
 ) -> Any:
-    """Run *fn(*args)* in a forked child process, optionally with cgroup limits.
+    """Run *fn(*args)* in a forked child process, optionally with resource limits.
 
     Results are passed back via an inherited pipe fd — no filesystem
-    dependency, so this works even when the workspace is a FUSE mount
-    inaccessible from the child's user namespace.
+    dependency, so this works even when the workspace is a FUSE mount.
 
     Args:
         fn: Callable to execute.
         args: Positional arguments for *fn*.
         workspace: Branch workspace path (passed to BranchContext).
-        limits: Optional resource limits applied to the child's cgroup.
+        mount_root: Filesystem mount root for Landlock confinement.
+        limits: Optional resource limits applied via setrlimit in the child.
         timeout: Maximum seconds to wait for the child.
-        parent_cgroup: Optional parent cgroup for hierarchical nesting.
-        scope_callback: Optional callback invoked with the cgroup scope path
-            after the child's scope is created.  Allows callers to track live
-            cgroup paths for external kill/throttle.
+        pid_callback: Optional callback invoked with the child PID
+            after the branch is created.  Allows callers to track live
+            branch PIDs for external kill.
 
     Returns:
         Whatever *fn* returned.
@@ -65,13 +64,13 @@ def run_in_process(
 
     try:
         with BranchContext(
-            _target, workspace=workspace, limits=limits,
-            parent_cgroup=parent_cgroup,
+            _target, workspace=workspace, mount_root=mount_root,
+            limits=limits,
         ) as ctx:
             os.close(write_fd)
             write_fd = -1  # prevent double-close in except branch
-            if scope_callback is not None and ctx.cgroup_scope is not None:
-                scope_callback(ctx.cgroup_scope)
+            if pid_callback is not None:
+                pid_callback(ctx.pid)
             try:
                 ctx.wait(timeout=timeout)
             except ProcessBranchError:

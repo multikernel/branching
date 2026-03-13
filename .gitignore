@@ -8,3 +8,7 @@ build/
 *.so
 .pytest_cache/
 .mypy_cache/
+
+# Generated BPF headers (regenerate via: make -C src/branching/process/bpf vmlinux.h)
+src/branching/process/bpf/vmlinux.h
+src/branching/process/bpf/*.o

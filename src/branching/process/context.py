@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """BranchContext: userspace approximation of branch(BR_CREATE).
 
-Each child runs in its own user + mount namespace with the branch
-workspace bind-mounted. Isolation failures raise, not silently degrade.
+Each child is confined to its branch workspace via Landlock (write-only
+access to the branch path, read access everywhere).  No namespaces or
+capabilities required.  Isolation failures raise, not silently degrade.
 """
 
 from __future__ import annotations
@@ -10,9 +11,7 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
-import tempfile
 import time
-import uuid
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence, TYPE_CHECKING
 
@@ -23,8 +22,9 @@ from ..memory._mprotect import (
     PROT_WRITE,
     mprotect as _mprotect,
 )
-from . import _cgroup
-from ._namespace import setup_user_ns, bind_mount
+from ._landlock import confine_to_branch
+from ._prlimit import apply_limits as _apply_limits
+from ._process_tracker import BpfProcessTracker
 
 if TYPE_CHECKING:
     from .limits import ResourceLimits
@@ -33,8 +33,11 @@ if TYPE_CHECKING:
 class BranchContext:
     """Userspace approximation of branch(BR_CREATE).
 
-    Each child runs in its own user + mount namespace with the branch
-    workspace bind-mounted. Isolation failures raise, not silently degrade.
+    Each child is confined to its branch workspace via Landlock
+    (write-only to the branch path, read everywhere).  Process tracking
+    via BPF LSM, resource limits via setrlimit.  No namespaces or
+    capabilities required.  Isolation failures raise, not silently
+    degrade.
 
     The target callable follows Python conventions: return normally for
     success, raise an exception for failure.
@@ -45,38 +48,35 @@ class BranchContext:
         target: Callable[[Path], None],
         workspace: Path,
         *,
-        isolate: bool = False,
+        mount_root: Path | None = None,
         close_fds: bool = False,
         limits: ResourceLimits | None = None,
-        parent_cgroup: Path | None = None,
         protected_regions: Sequence[tuple[int, int]] | None = None,
     ):
         """
         Args:
             target: Callable receiving workspace path. Return normally for
                     success, raise for failure.
-            workspace: Branch workspace path to bind-mount.
-            isolate: BR_ISOLATE — separate user ns per child (always-on
-                     since each child needs its own user ns for bind-mount).
-            close_fds: BR_CLOSE_FDS — close inherited fds (3+) in child.
-            limits: Optional resource limits applied via cgroup v2.
-            parent_cgroup: Optional parent cgroup directory.  When given,
-                the child's scope is created under this directory instead
-                of the process's own cgroup, enabling hierarchical nesting.
+            workspace: Branch workspace path (BranchFS virtual path).
+            mount_root: Filesystem mount root.  Used by Landlock to
+                confine the child to *workspace* while blocking reads
+                to sibling branches.  Defaults to ``workspace.parent``.
+            close_fds: Close inherited fds (3+) in child.
+            limits: Optional resource limits applied via setrlimit(2)
+                in the child process.
             protected_regions: Optional list of (addr, size) tuples.
                 After fork, these regions are marked read-only in the
                 parent via mprotect(2) to enforce the branch invariant.
         """
         self._target = target
         self._workspace = workspace
-        self._isolate = isolate
+        self._mount_root = mount_root or workspace.parent
         self._close_fds = close_fds
         self._limits = limits
-        self._parent_cgroup = parent_cgroup
         self._protected_regions = protected_regions
         self._pid: Optional[int] = None
         self._exited = False
-        self._cgroup_scope: Optional[Path] = None
+        self._branch_id: Optional[int] = None
         self._memory_regions: list[MemoryRegion] = []
 
     @property
@@ -86,9 +86,9 @@ class BranchContext:
         return self._pid
 
     @property
-    def cgroup_scope(self) -> Optional[Path]:
-        """The cgroup v2 scope directory, or ``None`` if unavailable."""
-        return self._cgroup_scope
+    def branch_id(self) -> Optional[int]:
+        """The branch_id assigned by the process tracker, or ``None``."""
+        return self._branch_id
 
     @property
     def alive(self) -> bool:
@@ -115,6 +115,7 @@ class BranchContext:
         """
         exit_code = self._wait_raw(timeout)
         self._restore_memory_regions()
+        self._tracker_cleanup()
         if exit_code != 0:
             raise ProcessBranchError(
                 f"Child {self._pid} exited with status {exit_code}"
@@ -149,17 +150,17 @@ class BranchContext:
         """Abort the child and all its descendants.
 
         Restores write access to protected memory regions, then kills the
-        child. Uses both cgroup kill (catches escapees) and killpg (POSIX
-        standard). Escalates SIGTERM -> SIGKILL after timeout.
+        child.  Uses the BPF LSM process tracker for reliable descendant
+        termination.  Escalates SIGTERM -> SIGKILL after timeout.
         """
         if self._pid is None or self._exited:
             return
 
         self._restore_memory_regions()
 
-        # Cgroup kill — catches descendants that escaped the process group
-        if self._cgroup_scope is not None:
-            _cgroup.kill_scope(self._cgroup_scope)
+        # Kill via BPF tracker (catches escaped descendants)
+        if self._branch_id is not None:
+            self._tracker.kill_branch(self._branch_id)
 
         # SIGTERM the process group
         try:
@@ -167,6 +168,7 @@ class BranchContext:
         except ProcessLookupError:
             self._exited = True
             self._reap()
+            self._tracker_cleanup()
             return
 
         # Poll for exit
@@ -176,9 +178,11 @@ class BranchContext:
                 result, _ = os.waitpid(self._pid, os.WNOHANG)
                 if result != 0:
                     self._exited = True
+                    self._tracker_cleanup()
                     return
             except ChildProcessError:
                 self._exited = True
+                self._tracker_cleanup()
                 return
             time.sleep(0.05)
 
@@ -190,6 +194,13 @@ class BranchContext:
 
         self._reap()
         self._exited = True
+        self._tracker_cleanup()
+
+    def _tracker_cleanup(self) -> None:
+        """Clean up process tracker state for this branch."""
+        if self._branch_id is not None:
+            self._tracker.cleanup(self._branch_id)
+            self._branch_id = None
 
     def _restore_memory_regions(self) -> None:
         """Restore write access to all protected memory regions."""
@@ -205,24 +216,8 @@ class BranchContext:
             pass
 
     def __enter__(self) -> "BranchContext":
-        # Create cgroup scope (best-effort — don't fail if cgroups unavailable)
-        # Use a unique suffix so each BranchContext gets its own scope
-        # (required for per-branch limits).
-        scope_name = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
-        try:
-            self._cgroup_scope = _cgroup.create_scope(
-                scope_name, parent=self._parent_cgroup,
-            )
-        except OSError:
-            self._cgroup_scope = None
-
-        # Apply resource limits *before* adding any PIDs so the child
-        # is constrained from the moment it starts running.
-        if self._cgroup_scope is not None and self._limits is not None:
-            _cgroup.set_limits(self._cgroup_scope, self._limits)
-
-        # Create a private mount directory for the child
-        self._private_dir = tempfile.mkdtemp(prefix="branchctx-")
+        # Require BPF process tracker before forking — fail fast
+        self._tracker = BpfProcessTracker.get()
 
         try:
             pid = os.fork()
@@ -234,18 +229,20 @@ class BranchContext:
             try:
                 os.setpgid(0, 0)
 
-                # User namespace + mount namespace (mandatory)
-                setup_user_ns()
+                # Landlock: confine to branch (read+write branch, read
+                # system paths, block sibling branches and workspace root)
+                confine_to_branch(self._workspace, self._mount_root)
 
-                # Bind-mount the workspace into our private dir
-                bind_mount(self._workspace, self._private_dir)
+                # Apply resource limits via setrlimit (inherited by children)
+                if self._limits is not None:
+                    _apply_limits(self._limits)
 
                 if self._close_fds:
                     max_fd = os.sysconf("SC_OPEN_MAX")
                     os.closerange(3, max_fd)
 
-                os.chdir(self._private_dir)
-                self._target(Path(self._private_dir))
+                os.chdir(self._workspace)
+                self._target(self._workspace)
                 os._exit(0)
             except SystemExit as e:
                 os._exit(e.code if isinstance(e.code, int) else 1)
@@ -261,12 +258,8 @@ class BranchContext:
             except OSError:
                 pass  # Child may have already set it
 
-            # Add to cgroup scope
-            if self._cgroup_scope is not None:
-                try:
-                    _cgroup.add_pid(self._cgroup_scope, pid)
-                except OSError:
-                    pass  # Best-effort
+            # Register with BPF process tracker
+            self._branch_id = self._tracker.register(pid)
 
             # Protect registered memory regions in the parent
             if self._protected_regions:
@@ -288,12 +281,6 @@ class BranchContext:
         # regions are still restored.
         self._restore_memory_regions()
 
-        # Clean up private mount dir (best-effort)
-        try:
-            os.rmdir(self._private_dir)
-        except OSError:
-            pass
-
         return False
 
     @staticmethod
@@ -302,23 +289,21 @@ class BranchContext:
         targets: Sequence[Callable[[Path], None]],
         workspaces: Sequence[Path],
         *,
-        isolate: bool = False,
+        mount_root: Path | None = None,
         close_fds: bool = False,
         limits: ResourceLimits | None = None,
-        parent_cgroup: Path | None = None,
         protected_regions: Sequence[tuple[int, int]] | None = None,
     ) -> Iterator[list["BranchContext"]]:
-        """Create N branch contexts, mirroring branch(BR_CREATE, n_branches=N).
+        """Create N branch contexts.
 
         Returns a context manager that cleans up all children on exit.
 
         Args:
             targets: Sequence of callables, each receiving a workspace Path.
             workspaces: Sequence of workspace Paths, one per target.
-            isolate: BR_ISOLATE — separate user ns per child.
-            close_fds: BR_CLOSE_FDS — close inherited fds in children.
-            limits: Optional resource limits applied via cgroup v2.
-            parent_cgroup: Optional parent cgroup for hierarchical nesting.
+            mount_root: Filesystem mount root for Landlock confinement.
+            close_fds: Close inherited fds in children.
+            limits: Optional resource limits applied via setrlimit(2).
             protected_regions: Optional list of (addr, size) tuples to
                 mark read-only in the parent after each fork.
 
@@ -332,8 +317,8 @@ class BranchContext:
         try:
             for target, workspace in zip(targets, workspaces):
                 ctx = BranchContext(
-                    target, workspace, isolate=isolate, close_fds=close_fds,
-                    limits=limits, parent_cgroup=parent_cgroup,
+                    target, workspace, mount_root=mount_root,
+                    close_fds=close_fds, limits=limits,
                     protected_regions=protected_regions,
                 )
                 ctx.__enter__()

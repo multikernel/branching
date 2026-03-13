@@ -77,40 +77,28 @@ class BestOfN:
         return bool(success), score
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
-        import os as _os
+        # Apply group-level limits to this process (inherited by all forks)
+        if self._group_limits is not None:
+            from ..process._prlimit import apply_limits
+            apply_limits(self._group_limits)
 
-        root_cgroup: Optional[Path] = None
-        if self._resource_limits is not None and self._group_limits is not None:
-            try:
-                from ..process._cgroup import create_group
-                root_cgroup = create_group(
-                    f"bestofn-{_os.getpid()}",
-                    limits=self._group_limits,
-                )
-            except OSError:
-                root_cgroup = None
+        return self._run(workspace)
 
-        try:
-            return self._run(workspace, root_cgroup)
-        finally:
-            if root_cgroup is not None:
-                from ..process._cgroup import kill_scope
-                kill_scope(root_cgroup)
-
-    def _run(self, workspace: Workspace, root_cgroup: Optional[Path]) -> SpeculationOutcome:
+    def _run(self, workspace: Workspace) -> SpeculationOutcome:
         n = len(self._candidates)
         results: list[Optional[SpeculationResult]] = [None] * n
         task_done = [threading.Event() for _ in range(n)]
         decision_ready = [threading.Event() for _ in range(n)]
         decisions = ["abort"] * n  # default: abort; main overwrites winner
 
-        branch_scopes: dict[int, Path] = {}
+        branch_pids: dict[int, int] = {}
 
-        def _kill_scopes(exclude: int = -1) -> None:
-            from ..process._cgroup import kill_scope
-            for idx, scope in list(branch_scopes.items()):
+        def _kill_branches(exclude: int = -1) -> None:
+            from ..process._process_tracker import BpfProcessTracker
+            tracker = BpfProcessTracker.get()
+            for idx, pid in list(branch_pids.items()):
                 if idx != exclude:
-                    kill_scope(scope)
+                    tracker.kill_branch(pid)
 
         def _run_candidate(index: int) -> None:
             result = SpeculationResult(branch_index=index, success=False)
@@ -120,15 +108,14 @@ class BestOfN:
                 ) as b:
                     result.branch_path = b.path
                     try:
-                        def _on_scope(sp: Path, _i: int = index) -> None:
-                            branch_scopes[_i] = sp
+                        def _on_pid(pid: int, _i: int = index) -> None:
+                            branch_pids[_i] = pid
 
                         ret = run_in_process(
                             self._candidates[index], (b.path,),
-                            workspace=b.path,
+                            workspace=b.path, mount_root=b.mount_root,
                             limits=self._resource_limits,
-                            parent_cgroup=root_cgroup,
-                            scope_callback=_on_scope if self._resource_limits else None,
+                            pid_callback=_on_pid if self._resource_limits else None,
                         )
                         success, score = self._score(ret, b.path, index)
                         result.success = success
@@ -186,7 +173,7 @@ class BestOfN:
             # Kill still-running tasks (only useful when timeout left
             # some workers stuck in ctx.wait — a no-op otherwise).
             if any(r is None for r in results):
-                _kill_scopes(best_idx if best_idx is not None else -1)
+                _kill_branches(best_idx if best_idx is not None else -1)
 
             # Release all threads to commit/abort
             for ev in decision_ready:
@@ -236,7 +223,7 @@ class Reflexion:
             max_retries: Maximum number of attempts.
             critique: Optional callable(path) -> feedback_string.
             resource_limits: Optional per-branch resource limits.
-            group_limits: Optional resource limits for the root cgroup.
+            group_limits: Optional resource limits applied to this process.
         """
         self._task = task
         self._max_retries = max_retries
@@ -245,27 +232,14 @@ class Reflexion:
         self._group_limits = group_limits
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
-        import os as _os
+        # Apply group-level limits to this process (inherited by all forks)
+        if self._group_limits is not None:
+            from ..process._prlimit import apply_limits
+            apply_limits(self._group_limits)
 
-        root_cgroup: Optional[Path] = None
-        if self._resource_limits is not None and self._group_limits is not None:
-            try:
-                from ..process._cgroup import create_group
-                root_cgroup = create_group(
-                    f"reflexion-{_os.getpid()}",
-                    limits=self._group_limits,
-                )
-            except OSError:
-                root_cgroup = None
+        return self._run(workspace)
 
-        try:
-            return self._run(workspace, root_cgroup)
-        finally:
-            if root_cgroup is not None:
-                from ..process._cgroup import kill_scope
-                kill_scope(root_cgroup)
-
-    def _run(self, workspace: Workspace, root_cgroup: Optional[Path]) -> SpeculationOutcome:
+    def _run(self, workspace: Workspace) -> SpeculationOutcome:
         results: list[SpeculationResult] = []
         feedback: Optional[str] = None
         winner: Optional[SpeculationResult] = None
@@ -281,9 +255,8 @@ class Reflexion:
                     result.branch_path = b.path
                     success = run_in_process(
                         self._task, (b.path, attempt, feedback),
-                        workspace=b.path,
+                        workspace=b.path, mount_root=b.mount_root,
                         limits=self._resource_limits,
-                        parent_cgroup=root_cgroup,
                     )
                     result.success = bool(success)
                     result.return_value = success
@@ -372,7 +345,7 @@ class TreeOfThoughts:
             max_depth: Maximum exploration depth (1 = single level).
             timeout: Per-level timeout in seconds.
             resource_limits: Optional per-branch resource limits.
-            group_limits: Optional resource limits for the root cgroup.
+            group_limits: Optional resource limits applied to this process.
         """
         self._strategies = list(strategies)
         self._evaluate = evaluate
@@ -383,37 +356,23 @@ class TreeOfThoughts:
         self._group_limits = group_limits
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
-        import os as _os
+        # Apply group-level limits to this process (inherited by all forks)
+        if self._group_limits is not None:
+            from ..process._prlimit import apply_limits
+            apply_limits(self._group_limits)
 
-        root_cgroup: Optional[Path] = None
-        if self._resource_limits is not None and self._group_limits is not None:
-            try:
-                from ..process._cgroup import create_group
-                root_cgroup = create_group(
-                    f"tot-{_os.getpid()}",
-                    limits=self._group_limits,
-                )
-            except OSError:
-                root_cgroup = None
-
-        try:
-            if self._expand is None or self._max_depth <= 1:
-                return self._single_level(
-                    workspace, self._strategies, depth=0,
-                    parent_cgroup=root_cgroup,
-                )
-            return self._multi_level(workspace, root_cgroup)
-        finally:
-            if root_cgroup is not None:
-                from ..process._cgroup import kill_scope
-                kill_scope(root_cgroup)
+        if self._expand is None or self._max_depth <= 1:
+            return self._single_level(
+                workspace, self._strategies, depth=0,
+            )
+        return self._multi_level(workspace)
 
     # ------------------------------------------------------------------
     # Single level: parallel exploration, main picks best
     # ------------------------------------------------------------------
 
     def _single_level(
-        self, parent, strategies, depth, *, parent_cgroup=None,
+        self, parent, strategies, depth,
     ) -> SpeculationOutcome:
         """Run strategies in parallel on parent. Winner commits, rest abort."""
         n = len(strategies)
@@ -425,13 +384,14 @@ class TreeOfThoughts:
         decision_ready = [threading.Event() for _ in range(n)]
         decisions = ["abort"] * n
 
-        branch_scopes: dict[int, Path] = {}
+        branch_pids: dict[int, int] = {}
 
-        def _kill_scopes(exclude: int = -1) -> None:
-            from ..process._cgroup import kill_scope
-            for idx, scope in list(branch_scopes.items()):
+        def _kill_branches(exclude: int = -1) -> None:
+            from ..process._process_tracker import BpfProcessTracker
+            tracker = BpfProcessTracker.get()
+            for idx, pid in list(branch_pids.items()):
                 if idx != exclude:
-                    kill_scope(scope)
+                    tracker.kill_branch(pid)
 
         def _run(index: int) -> None:
             result = SpeculationResult(branch_index=index, success=False)
@@ -441,15 +401,14 @@ class TreeOfThoughts:
                 ) as b:
                     result.branch_path = b.path
                     try:
-                        def _on_scope(sp: Path, _i: int = index) -> None:
-                            branch_scopes[_i] = sp
+                        def _on_pid(pid: int, _i: int = index) -> None:
+                            branch_pids[_i] = pid
 
                         ret = run_in_process(
                             strategies[index], (b.path,),
-                            workspace=b.path,
+                            workspace=b.path, mount_root=b.mount_root,
                             limits=self._resource_limits,
-                            parent_cgroup=parent_cgroup,
-                            scope_callback=_on_scope if self._resource_limits else None,
+                            pid_callback=_on_pid if self._resource_limits else None,
                         )
                         if isinstance(ret, (tuple, list)):
                             success, score = ret
@@ -504,7 +463,7 @@ class TreeOfThoughts:
                 decisions[best_idx] = "commit"
 
             if any(r is None for r in results):
-                _kill_scopes(best_idx if best_idx is not None else -1)
+                _kill_branches(best_idx if best_idx is not None else -1)
 
             for ev in decision_ready:
                 ev.set()
@@ -527,7 +486,7 @@ class TreeOfThoughts:
     # ------------------------------------------------------------------
 
     def _multi_level(
-        self, workspace: Workspace, root_cgroup: Path | None = None,
+        self, workspace: Workspace,
     ) -> SpeculationOutcome:
         """Multi-depth exploration wrapped in a root branch.
 
@@ -550,7 +509,6 @@ class TreeOfThoughts:
 
                     outcome = self._single_level(
                         root, current_strategies, depth,
-                        parent_cgroup=root_cgroup,
                     )
                     all_results.extend(outcome.all_results)
 
@@ -652,46 +610,32 @@ class BeamSearch:
         return [i for i, _ in scored[:k]]
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
-        import os as _os
-
         n = len(self._strategies)
         if n == 0:
             return SpeculationOutcome()
 
-        root_cgroup: Optional[Path] = None
-        if self._resource_limits is not None and self._group_limits is not None:
-            try:
-                from ..process._cgroup import create_group
-                root_cgroup = create_group(
-                    f"beamsearch-{_os.getpid()}",
-                    limits=self._group_limits,
-                )
-            except OSError:
-                root_cgroup = None
+        # Apply group-level limits to this process (inherited by all forks)
+        if self._group_limits is not None:
+            from ..process._prlimit import apply_limits
+            apply_limits(self._group_limits)
 
-        try:
-            return self._run(workspace, n, root_cgroup)
-        finally:
-            if root_cgroup is not None:
-                from ..process._cgroup import kill_scope
-                kill_scope(root_cgroup)
+        return self._run(workspace, n)
 
     def _run(
-        self, workspace: Workspace, n: int, root_cgroup: Optional[Path],
+        self, workspace: Workspace, n: int,
     ) -> SpeculationOutcome:
         K = self._beam_width
         all_results: list[SpeculationResult] = []
 
-        # Pre-allocate per-beam intermediate cgroups (thread-safe population)
-        beam_cgroups: list[Optional[Path]] = [None] * n
-        # Track leaf cgroup scopes for kill-on-prune.
-        beam_task_scopes: dict[int, Path] = {}
+        # Track child PIDs for kill-on-prune.
+        beam_pids: dict[int, int] = {}
 
-        def _kill_beam_scopes(keep: set[int]) -> None:
-            from ..process._cgroup import kill_scope
-            for idx, scope in list(beam_task_scopes.items()):
+        def _kill_beams(keep: set[int]) -> None:
+            from ..process._process_tracker import BpfProcessTracker
+            tracker = BpfProcessTracker.get()
+            for idx, pid in list(beam_pids.items()):
                 if idx not in keep:
-                    kill_scope(scope)
+                    tracker.kill_branch(pid)
 
         # -- Level 0: create beam branches from workspace ----------------
         beam_branches: list[Optional[object]] = [None] * n
@@ -702,15 +646,6 @@ class BeamSearch:
 
         def _beam_worker(index: int) -> None:
             result = SpeculationResult(branch_index=index, success=False)
-            # Create per-beam intermediate cgroup
-            if root_cgroup is not None:
-                try:
-                    from ..process._cgroup import create_group as _cg
-                    beam_cgroups[index] = _cg(
-                        f"beam_{index}", parent=root_cgroup,
-                    )
-                except OSError:
-                    pass
             try:
                 with workspace.branch(
                     f"beam_{index}", on_success=None, on_error=None
@@ -718,15 +653,14 @@ class BeamSearch:
                     result.branch_path = b.path
                     beam_branches[index] = b
                     try:
-                        def _on_scope(sp: Path, _i: int = index) -> None:
-                            beam_task_scopes[_i] = sp
+                        def _on_pid(pid: int, _i: int = index) -> None:
+                            beam_pids[_i] = pid
 
                         ret = run_in_process(
                             self._strategies[index], (b.path,),
-                            workspace=b.path,
+                            workspace=b.path, mount_root=b.mount_root,
                             limits=self._resource_limits,
-                            parent_cgroup=beam_cgroups[index],
-                            scope_callback=_on_scope if self._resource_limits else None,
+                            pid_callback=_on_pid if self._resource_limits else None,
                         )
                         result.success, result.score = self._score(
                             ret, b.path
@@ -780,7 +714,7 @@ class BeamSearch:
 
             # Kill timed-out beams (no-op when all tasks finished).
             if any(r is None for r in level0_results):
-                _kill_beam_scopes(survivors)
+                _kill_beams(survivors)
             for i in range(n):
                 if i not in survivors:
                     final_actions[i] = "abort"
@@ -807,7 +741,7 @@ class BeamSearch:
                 sub_done = [threading.Event() for _ in range(m)]
                 sub_decision_ready = [threading.Event() for _ in range(m)]
                 sub_decisions = ["abort"] * m
-                sub_scopes: dict[int, Path] = {}
+                sub_pids: dict[int, int] = {}
                 _depth = depth  # capture value for closure
 
                 def _sub_worker(idx: int, _d: int = _depth) -> None:
@@ -824,17 +758,16 @@ class BeamSearch:
                         ) as sb:
                             result.branch_path = sb.path
                             try:
-                                def _on_sub_scope(
-                                    sp: Path, _j: int = idx,
+                                def _on_sub_pid(
+                                    pid: int, _j: int = idx,
                                 ) -> None:
-                                    sub_scopes[_j] = sp
+                                    sub_pids[_j] = pid
 
                                 ret = run_in_process(
                                     strategy, (sb.path,),
-                                    workspace=sb.path,
+                                    workspace=sb.path, mount_root=sb.mount_root,
                                     limits=self._resource_limits,
-                                    parent_cgroup=beam_cgroups[beam_idx],
-                                    scope_callback=_on_sub_scope if self._resource_limits else None,
+                                    pid_callback=_on_sub_pid if self._resource_limits else None,
                                 )
                                 result.success, result.score = self._score(
                                     ret, sb.path
@@ -879,10 +812,11 @@ class BeamSearch:
 
                     # Kill timed-out sub-branches (no-op when all finished).
                     if any(r is None for r in sub_results):
-                        from ..process._cgroup import kill_scope as _ks
-                        for si, scope in list(sub_scopes.items()):
+                        from ..process._process_tracker import BpfProcessTracker
+                        _tracker = BpfProcessTracker.get()
+                        for si, pid in list(sub_pids.items()):
                             if si not in top_k_indices:
-                                _ks(scope)
+                                _tracker.kill_branch(pid)
 
                     for i in top_k_indices:
                         sub_decisions[i] = "commit"
@@ -967,7 +901,7 @@ class Tournament:
                    Compares two candidates' branches during elimination.
             timeout: Overall timeout in seconds.
             resource_limits: Optional per-branch resource limits.
-            group_limits: Optional resource limits for the root cgroup.
+            group_limits: Optional resource limits applied to this process.
         """
         self._candidates = list(candidates)
         self._judge = judge
@@ -997,27 +931,14 @@ class Tournament:
         return survivors[0]
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
-        import os as _os
+        # Apply group-level limits to this process (inherited by all forks)
+        if self._group_limits is not None:
+            from ..process._prlimit import apply_limits
+            apply_limits(self._group_limits)
 
-        root_cgroup: Optional[Path] = None
-        if self._resource_limits is not None and self._group_limits is not None:
-            try:
-                from ..process._cgroup import create_group
-                root_cgroup = create_group(
-                    f"tournament-{_os.getpid()}",
-                    limits=self._group_limits,
-                )
-            except OSError:
-                root_cgroup = None
+        return self._run(workspace)
 
-        try:
-            return self._run(workspace, root_cgroup)
-        finally:
-            if root_cgroup is not None:
-                from ..process._cgroup import kill_scope
-                kill_scope(root_cgroup)
-
-    def _run(self, workspace: Workspace, root_cgroup: Optional[Path]) -> SpeculationOutcome:
+    def _run(self, workspace: Workspace) -> SpeculationOutcome:
         n = len(self._candidates)
         results: list[Optional[SpeculationResult]] = [None] * n
         branch_paths: list[Optional[Path]] = [None] * n
@@ -1025,13 +946,14 @@ class Tournament:
         decision_ready = [threading.Event() for _ in range(n)]
         decisions = ["abort"] * n
 
-        branch_scopes: dict[int, Path] = {}
+        branch_pids: dict[int, int] = {}
 
-        def _kill_scopes(exclude: int = -1) -> None:
-            from ..process._cgroup import kill_scope
-            for idx, scope in list(branch_scopes.items()):
+        def _kill_branches(exclude: int = -1) -> None:
+            from ..process._process_tracker import BpfProcessTracker
+            tracker = BpfProcessTracker.get()
+            for idx, pid in list(branch_pids.items()):
                 if idx != exclude:
-                    kill_scope(scope)
+                    tracker.kill_branch(pid)
 
         def _run_candidate(index: int) -> None:
             result = SpeculationResult(branch_index=index, success=False)
@@ -1042,15 +964,14 @@ class Tournament:
                     result.branch_path = b.path
                     branch_paths[index] = b.path
                     try:
-                        def _on_scope(sp: Path, _i: int = index) -> None:
-                            branch_scopes[_i] = sp
+                        def _on_pid(pid: int, _i: int = index) -> None:
+                            branch_pids[_i] = pid
 
                         success = run_in_process(
                             self._candidates[index], (b.path,),
-                            workspace=b.path,
+                            workspace=b.path, mount_root=b.mount_root,
                             limits=self._resource_limits,
-                            parent_cgroup=root_cgroup,
-                            scope_callback=_on_scope if self._resource_limits else None,
+                            pid_callback=_on_pid if self._resource_limits else None,
                         )
                         result.success = bool(success)
                         result.return_value = success
@@ -1107,7 +1028,7 @@ class Tournament:
                 decisions[winner_idx] = "commit"
 
             if any(r is None for r in results):
-                _kill_scopes(winner_idx if winner_idx is not None else -1)
+                _kill_branches(winner_idx if winner_idx is not None else -1)
 
             # Release all threads
             for ev in decision_ready:
@@ -1179,7 +1100,7 @@ class Cascaded:
             timeout: Overall timeout in seconds across all waves.
             wave_timeout: Per-wave timeout in seconds.
             resource_limits: Optional per-branch resource limits.
-            group_limits: Optional resource limits for the root cgroup.
+            group_limits: Optional resource limits applied to this process.
         """
         self._task = task
         self._fan_out = list(fan_out)
@@ -1189,28 +1110,15 @@ class Cascaded:
         self._group_limits = group_limits
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
-        import os as _os
+        # Apply group-level limits to this process (inherited by all forks)
+        if self._group_limits is not None:
+            from ..process._prlimit import apply_limits
+            apply_limits(self._group_limits)
 
-        root_cgroup: Optional[Path] = None
-        if self._resource_limits is not None and self._group_limits is not None:
-            try:
-                from ..process._cgroup import create_group
-                root_cgroup = create_group(
-                    f"cascaded-{_os.getpid()}",
-                    limits=self._group_limits,
-                )
-            except OSError:
-                root_cgroup = None
-
-        try:
-            return self._run(workspace, root_cgroup)
-        finally:
-            if root_cgroup is not None:
-                from ..process._cgroup import kill_scope
-                kill_scope(root_cgroup)
+        return self._run(workspace)
 
     def _run(
-        self, workspace: Workspace, root_cgroup: Optional[Path],
+        self, workspace: Workspace,
     ) -> SpeculationOutcome:
         all_results: list[SpeculationResult] = []
         feedback: list[str] = []
@@ -1232,7 +1140,7 @@ class Cascaded:
 
             outcome = self._run_wave(
                 workspace, wave, width, feedback_snapshot, base_index,
-                root_cgroup, deadline, wave_errors,
+                deadline, wave_errors,
             )
             all_results.extend(outcome.all_results)
 
@@ -1255,7 +1163,6 @@ class Cascaded:
         width: int,
         feedback: list[str],
         base_index: int,
-        root_cgroup: Optional[Path],
         deadline: Optional[float],
         wave_errors: list[str],
     ) -> SpeculationOutcome:
@@ -1265,13 +1172,14 @@ class Cascaded:
         committed = False
         cancel_event = threading.Event()
 
-        branch_scopes: dict[int, Path] = {}
+        branch_pids: dict[int, int] = {}
 
-        def _kill_scopes(exclude: int = -1) -> None:
-            from ..process._cgroup import kill_scope
-            for idx, scope in list(branch_scopes.items()):
+        def _kill_branches(exclude: int = -1) -> None:
+            from ..process._process_tracker import BpfProcessTracker
+            tracker = BpfProcessTracker.get()
+            for idx, pid in list(branch_pids.items()):
                 if idx != exclude:
-                    kill_scope(scope)
+                    tracker.kill_branch(pid)
 
         # Compute effective wave timeout.
         wt = self._wave_timeout
@@ -1299,12 +1207,12 @@ class Cascaded:
                         b.abort()
                         return result
 
-                    def _on_scope(scope_path: Path, _i: int = index) -> None:
-                        branch_scopes[_i] = scope_path
+                    def _on_pid(pid: int, _i: int = index) -> None:
+                        branch_pids[_i] = pid
 
                     success, error_ctx = self._run_task(
-                        b.path, feedback, root_cgroup,
-                        scope_callback=_on_scope if self._resource_limits else None,
+                        b.path, b.mount_root, feedback,
+                        pid_callback=_on_pid if self._resource_limits else None,
                         timeout=wt,
                     )
 
@@ -1313,7 +1221,7 @@ class Cascaded:
 
                     if result.success and not cancel_event.is_set():
                         cancel_event.set()
-                        _kill_scopes(index)
+                        _kill_branches(index)
                         try:
                             b.commit()
                         except ConflictError:
@@ -1357,7 +1265,7 @@ class Cascaded:
                         committed = True
             except TimeoutError:
                 cancel_event.set()
-                _kill_scopes()
+                _kill_branches()
 
             for f in futures:
                 if not f.done():
@@ -1381,9 +1289,9 @@ class Cascaded:
     def _run_task(
         self,
         path: Path,
+        mount_root: Path,
         feedback: list[str],
-        parent_cgroup: Optional[Path],
-        scope_callback=None,
+        pid_callback=None,
         timeout: Optional[float] = None,
     ) -> tuple[bool, str]:
         """Run the task in a forked child with resource limits."""
@@ -1394,10 +1302,10 @@ class Cascaded:
                 self._task,
                 (path, feedback),
                 workspace=path,
+                mount_root=mount_root,
                 limits=self._resource_limits,
                 timeout=timeout,
-                parent_cgroup=parent_cgroup,
-                scope_callback=scope_callback,
+                pid_callback=pid_callback,
             )
             if isinstance(ret, (tuple, list)):
                 success, error_ctx = ret

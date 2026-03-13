@@ -359,7 +359,8 @@ with ws.branch("strategy_a") as a:
 ### Process isolation
 
 For untrusted or crash-prone agent code, `BranchContext` runs each task in
-a sandboxed child process with its own filesystem view. No root needed.
+a sandboxed child process confined to its own branch via Landlock. No root
+needed.
 
 ```python
 from branching import BranchContext
@@ -392,14 +393,14 @@ outcome = Speculate(candidates, isolate_processes=True, timeout=60)(ws)
 
 ### Resource limits
 
-Constrain per-branch memory and CPU via cgroup v2. Passing
+Constrain per-branch memory and CPU via setrlimit(2). Passing
 `resource_limits` to any pattern automatically enables process isolation -
-each branch runs in a forked child with cgroup enforcement.
+each branch runs in a forked child with limits enforced.
 
 ```python
 from branching import ResourceLimits, BestOfN
 
-limits = ResourceLimits(memory=512 * 1024 * 1024, cpu=0.5)  # 512 MB, 50% CPU
+limits = ResourceLimits(memory=512 * 1024 * 1024, cpu_time=30)  # 512 MB, 30s CPU
 
 outcome = BestOfN(candidates, resource_limits=limits)(ws)
 ```
@@ -495,13 +496,20 @@ first-winner-commit semantics.
 
 You just create a `Workspace` pointed at a mounted BranchFS path.
 
-Process isolation (`BranchContext`) uses unprivileged Linux user namespaces
-to give each child its own filesystem view. No root required - works on any
-Linux distribution with `unprivileged_userns_clone=1` (the default).
+Process isolation (`BranchContext`) uses fork + Landlock LSM + BPF LSM to
+sandbox each child process. No namespaces, no cgroups, no root required:
 
-Resource limits (`ResourceLimits`) use cgroup v2 to enforce per-branch
-memory and CPU constraints. Each branch gets its own cgroup scope with
-limits applied before the child process starts. Requires cgroup v2 with
-the memory and cpu controllers enabled (the default on modern systemd
-distributions).
+- **Landlock LSM** (Linux 5.13+) confines each child to its own branch.
+  The child can read the filesystem outside the workspace but can only write
+  under its branch path. Sibling branches and the mount root are denied.
+  `LANDLOCK_ACCESS_FS_REFER` is included in the handled set so that
+  rename/link across the branch boundary is blocked.
+- **BPF LSM** provides inescapable process tracking. All descendants of a
+  branched process inherit the branch ID, enabling atomic teardown of an
+  entire branch's process tree. Requires `CONFIG_BPF_LSM=y` and
+  `lsm=...,bpf,...` in the kernel command line.
+- **setrlimit(2)** enforces per-branch resource limits (memory via
+  `RLIMIT_AS`, CPU time via `RLIMIT_CPU`, process count via `RLIMIT_NPROC`).
+  Lightweight alternative to cgroups -- no cgroupfs infrastructure needed,
+  limits are inherited by children on fork.
 

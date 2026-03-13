@@ -2,34 +2,29 @@
 """Tests verifying actual fork behavior via run_in_process."""
 
 import os
-import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from branching.process.runner import run_in_process
 
 
-def _can_unshare_userns() -> bool:
-    """Check if the system supports unprivileged user namespaces."""
-    try:
-        result = subprocess.run(
-            ["unshare", "--user", "--map-root-user", "true"],
-            capture_output=True, timeout=5,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+# Mock BPF tracker and Landlock for all tests that fork.
+@pytest.fixture(autouse=True)
+def _mock_bpf_and_landlock():
+    mock_tracker = MagicMock()
+    mock_tracker.register.return_value = 1
+    with patch(
+        "branching.process.context.BpfProcessTracker.get",
+        return_value=mock_tracker,
+    ), patch(
+        "branching.process.context.confine_to_branch",
+    ):
+        yield
 
 
-needs_userns = pytest.mark.skipif(
-    not _can_unshare_userns(),
-    reason="Kernel does not support unprivileged user namespaces",
-)
-
-
-@needs_userns
 def test_fork_runs_in_child_process():
     """Task runs in a child process with a different PID."""
     parent_pid = os.getpid()
@@ -46,7 +41,6 @@ def test_fork_runs_in_child_process():
         assert child_pid != parent_pid
 
 
-@needs_userns
 def test_fork_inherits_parent_memory():
     """Forked child inherits parent's global state via COW."""
     import test_fork as _self_module
@@ -69,9 +63,8 @@ def test_fork_inherits_parent_memory():
     del _self_module._inherited_value
 
 
-@needs_userns
 def test_fork_without_resource_limits():
-    """run_in_process works with limits=None (fork without cgroup)."""
+    """run_in_process works with limits=None (fork without resource limits)."""
     def task(workspace):
         return 42
 

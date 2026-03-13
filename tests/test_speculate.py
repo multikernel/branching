@@ -17,9 +17,13 @@ def mock_run_in_process():
     """Run tasks in-process for unit tests (skip fork/namespace)."""
     def _run_inline(fn, args, workspace, **kwargs):
         return fn(*args)
-    with patch("branching.agent.patterns.run_in_process", _run_inline):
-        with patch("branching.process.runner.run_in_process", _run_inline):
-            yield
+    mock_tracker = MagicMock()
+    mock_tracker.register.return_value = 1
+    with patch("branching.agent.patterns.run_in_process", _run_inline), \
+         patch("branching.process.runner.run_in_process", _run_inline), \
+         patch("branching.process._process_tracker.BpfProcessTracker.get",
+               return_value=mock_tracker):
+        yield
 
 
 class MockFSBackend(FSBackend):

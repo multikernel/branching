@@ -62,11 +62,6 @@ class ForkError(ProcessBranchError):
     pass
 
 
-class NamespaceError(ProcessBranchError):
-    """Namespace setup failed."""
-
-    pass
-
 
 class MemoryBranchError(BranchingError):
     """Memory branching operation failed."""

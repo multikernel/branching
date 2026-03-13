@@ -26,5 +26,8 @@ branching = "cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"branching.process.bpf" = ["*.bpf.o"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

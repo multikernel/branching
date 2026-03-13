@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Resource limits for per-branch cgroup constraints."""
+"""Resource limits applied via setrlimit(2).
+
+Replaces the former cgroup v2 controller approach with lightweight
+per-process rlimits.  Limits are inherited by children on fork,
+so setting them once on the parent provides group-level budgets.
+"""
 
 from __future__ import annotations
 
@@ -40,29 +45,27 @@ def parse_memory_size(s: str) -> int:
 
 @dataclass(frozen=True)
 class ResourceLimits:
-    """Per-branch resource limits applied via cgroup v2.
+    """Per-process resource limits applied via setrlimit(2).
 
-    All fields default to ``None`` (unlimited).  A ``ResourceLimits()``
-    with all ``None`` fields still triggers process isolation but applies
-    no cgroup limits.
+    All fields default to ``None`` (unlimited).  Limits are inherited
+    by children on fork, so setting them before forking provides
+    group-level budgets without cgroup infrastructure.
+
+    Note: ``memory`` maps to ``RLIMIT_AS`` (virtual address space),
+    not physical RSS.  This is coarser than cgroup ``memory.max``
+    but requires no kernel infrastructure.
     """
 
     memory: int | None = None
-    """Maximum memory in bytes (written to ``memory.max``)."""
+    """Maximum virtual address space in bytes (``RLIMIT_AS``)."""
 
-    cpu: float | None = None
-    """Fraction of one CPU (0.5 = 50%).  Written to ``cpu.max``."""
+    cpu_time: int | None = None
+    """Maximum CPU time in seconds (``RLIMIT_CPU``).
 
-    memory_high: int | None = None
-    """Soft memory throttle in bytes (written to ``memory.high``).
-
-    When usage exceeds this value the kernel reclaims aggressively but
-    does *not* OOM-kill the process.
+    When exceeded the kernel sends ``SIGXCPU``, then ``SIGKILL``
+    one second later.  This is a cumulative budget, not a rate
+    limit (unlike cgroup ``cpu.max``).
     """
 
-    oom_group: bool = False
-    """Atomic OOM termination (written to ``memory.oom.group``).
-
-    When ``True``, all processes in the cgroup are killed together on
-    OOM rather than picking a single victim.
-    """
+    nproc: int | None = None
+    """Maximum number of processes for the real user ID (``RLIMIT_NPROC``)."""

@@ -88,26 +88,21 @@ def _add_resource_limit_args(parser: argparse.ArgumentParser) -> None:
         "--memory-limit",
         default=None,
         metavar="SIZE",
-        help="Per-branch memory limit (e.g. 512M, 1G). Implies process isolation.",
+        help="Per-branch virtual address space limit (e.g. 512M, 1G). Applied via RLIMIT_AS.",
     )
     parser.add_argument(
-        "--cpu-limit",
-        type=float,
+        "--cpu-time-limit",
+        type=int,
         default=None,
-        metavar="FRAC",
-        help="Per-branch CPU limit as fraction of 1 CPU (e.g. 0.5 = 50%%). Implies process isolation.",
+        metavar="SECS",
+        help="Per-branch CPU time budget in seconds. Applied via RLIMIT_CPU.",
     )
     parser.add_argument(
-        "--memory-high",
+        "--nproc-limit",
+        type=int,
         default=None,
-        metavar="SIZE",
-        help="Per-branch soft memory throttle (memory.high). Reclaims aggressively but no OOM kill.",
-    )
-    parser.add_argument(
-        "--oom-group",
-        action="store_true",
-        default=False,
-        help="Enable atomic OOM termination (memory.oom.group). Kills entire branch on OOM.",
+        metavar="N",
+        help="Max number of processes per branch. Applied via RLIMIT_NPROC.",
     )
 
 
@@ -117,40 +112,46 @@ def _add_group_limit_args(parser: argparse.ArgumentParser) -> None:
         "--group-memory-limit",
         default=None,
         metavar="SIZE",
-        help="Total memory budget for all branches (group cgroup memory.max).",
+        help="Total virtual address space budget for all branches (RLIMIT_AS).",
     )
     parser.add_argument(
-        "--group-cpu-limit",
-        type=float,
+        "--group-cpu-time-limit",
+        type=int,
         default=None,
-        metavar="FRAC",
-        help="Total CPU budget for all branches (group cgroup cpu.max).",
+        metavar="SECS",
+        help="Total CPU time budget for all branches in seconds (RLIMIT_CPU).",
+    )
+    parser.add_argument(
+        "--group-nproc-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Max processes across all branches (RLIMIT_NPROC).",
     )
 
 
 def _parse_resource_limits(args: argparse.Namespace):
     """Parse per-branch resource limit flags into a ResourceLimits or None."""
     mem_str = getattr(args, "memory_limit", None)
-    cpu_val = getattr(args, "cpu_limit", None)
-    mem_high_str = getattr(args, "memory_high", None)
-    oom_group = getattr(args, "oom_group", False)
-    if mem_str is None and cpu_val is None and mem_high_str is None and not oom_group:
+    cpu_time = getattr(args, "cpu_time_limit", None)
+    nproc = getattr(args, "nproc_limit", None)
+    if mem_str is None and cpu_time is None and nproc is None:
         return None
     from branching.process.limits import ResourceLimits, parse_memory_size
     memory = parse_memory_size(mem_str) if mem_str is not None else None
-    memory_high = parse_memory_size(mem_high_str) if mem_high_str is not None else None
-    return ResourceLimits(memory=memory, cpu=cpu_val, memory_high=memory_high, oom_group=oom_group)
+    return ResourceLimits(memory=memory, cpu_time=cpu_time, nproc=nproc)
 
 
 def _parse_group_limits(args: argparse.Namespace):
     """Parse group-level resource limit flags into a ResourceLimits or None."""
     mem_str = getattr(args, "group_memory_limit", None)
-    cpu_val = getattr(args, "group_cpu_limit", None)
-    if mem_str is None and cpu_val is None:
+    cpu_time = getattr(args, "group_cpu_time_limit", None)
+    nproc = getattr(args, "group_nproc_limit", None)
+    if mem_str is None and cpu_time is None and nproc is None:
         return None
     from branching.process.limits import ResourceLimits, parse_memory_size
     memory = parse_memory_size(mem_str) if mem_str is not None else None
-    return ResourceLimits(memory=memory, cpu=cpu_val)
+    return ResourceLimits(memory=memory, cpu_time=cpu_time, nproc=nproc)
 
 
 def build_parser() -> argparse.ArgumentParser:

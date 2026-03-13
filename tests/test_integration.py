@@ -8,22 +8,11 @@ The BRANCHFS_MOUNT environment variable specifies the mount point.
 """
 
 import os
-import subprocess
 from pathlib import Path
 
 import pytest
 
-
-def _can_unshare_userns() -> bool:
-    """Check if the system supports unprivileged user namespaces."""
-    try:
-        result = subprocess.run(
-            ["unshare", "--user", "--map-root-user", "true"],
-            capture_output=True, timeout=5,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+from branching.process._landlock import landlock_abi_version
 
 
 needs_branchfs = pytest.mark.skipif(
@@ -31,9 +20,9 @@ needs_branchfs = pytest.mark.skipif(
     reason="BRANCHFS_MOUNT not set (no live branchfs)",
 )
 
-needs_userns = pytest.mark.skipif(
-    not _can_unshare_userns(),
-    reason="Kernel does not support unprivileged user namespaces",
+needs_landlock = pytest.mark.skipif(
+    landlock_abi_version() < 1,
+    reason="Kernel does not support Landlock",
 )
 
 
@@ -118,7 +107,7 @@ def test_sibling_branches_first_wins(ws):
 
 
 @needs_branchfs
-@needs_userns
+@needs_landlock
 def test_speculate_parallel(ws):
     """Speculate runs candidates in parallel, commits the winner."""
     from branching import Speculate
@@ -140,7 +129,7 @@ def test_speculate_parallel(ws):
 
 
 @needs_branchfs
-@needs_userns
+@needs_landlock
 def test_tree_of_thoughts_multi_level(ws):
     """TreeOfThoughts with expand commits accumulated state across levels."""
     from branching import TreeOfThoughts

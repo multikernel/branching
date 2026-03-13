@@ -2,10 +2,10 @@
 """Tests for BranchContext process branching."""
 
 import os
-import subprocess
 import time
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -13,25 +13,22 @@ from branching.process.context import BranchContext
 from branching.exceptions import ProcessBranchError
 
 
-def _can_unshare_userns() -> bool:
-    """Check if the system supports unprivileged user namespaces."""
-    try:
-        result = subprocess.run(
-            ["unshare", "--user", "--map-root-user", "true"],
-            capture_output=True, timeout=5,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+# Mock BPF tracker and Landlock for all tests that fork — BPF LSM
+# requires CAP_BPF and Landlock requires CONFIG_SECURITY_LANDLOCK,
+# which CI environments typically lack.
+@pytest.fixture(autouse=True)
+def _mock_bpf_and_landlock():
+    mock_tracker = MagicMock()
+    mock_tracker.register.return_value = 1
+    with patch(
+        "branching.process.context.BpfProcessTracker.get",
+        return_value=mock_tracker,
+    ), patch(
+        "branching.process.context.confine_to_branch",
+    ):
+        yield
 
 
-needs_userns = pytest.mark.skipif(
-    not _can_unshare_userns(),
-    reason="Kernel does not support unprivileged user namespaces",
-)
-
-
-@needs_userns
 def test_basic_success():
     """Target that returns normally means success — wait() returns None."""
     with tempfile.TemporaryDirectory() as ws:
@@ -40,7 +37,6 @@ def test_basic_success():
             ctx.wait(timeout=10.0)  # should not raise
 
 
-@needs_userns
 def test_target_failure_raises():
     """Target that raises causes wait() to raise ProcessBranchError."""
     def failing_target(p: Path) -> None:
@@ -52,7 +48,6 @@ def test_target_failure_raises():
                 ctx.wait(timeout=10.0)
 
 
-@needs_userns
 def test_exception_in_target():
     """Unhandled exception in target causes ProcessBranchError on wait."""
     def bad_target(p: Path) -> None:
@@ -64,7 +59,6 @@ def test_exception_in_target():
                 ctx.wait(timeout=10.0)
 
 
-@needs_userns
 def test_abort():
     """Abort kills a sleeping child."""
     def sleeper(p: Path) -> None:
@@ -78,7 +72,6 @@ def test_abort():
             assert not ctx.alive
 
 
-@needs_userns
 def test_wait_timeout():
     """TimeoutError raised when child doesn't exit in time."""
     def sleeper(p: Path) -> None:
@@ -90,7 +83,6 @@ def test_wait_timeout():
                 ctx.wait(timeout=0.2)
 
 
-@needs_userns
 def test_context_manager():
     """__enter__/__exit__ lifecycle works correctly."""
     with tempfile.TemporaryDirectory() as ws:
@@ -102,7 +94,6 @@ def test_context_manager():
         assert not ctx.alive
 
 
-@needs_userns
 def test_abort_on_exit():
     """Child is aborted when leaving the context manager."""
     with tempfile.TemporaryDirectory() as ws:
@@ -130,7 +121,6 @@ def test_properties():
         assert ctx.alive is False
 
 
-@needs_userns
 def test_close_fds():
     """Child has only stdin/stdout/stderr open when close_fds=True."""
     def check_fds(p: Path) -> None:
@@ -145,23 +135,21 @@ def test_close_fds():
             ctx.wait(timeout=10.0)
 
 
-@needs_userns
-def test_mount_namespace_isolation():
-    """Child sees bind-mounted workspace, but parent mount table is unaffected."""
+def test_workspace_path_passed_to_target():
+    """Child receives the workspace path and can read files from it."""
     with tempfile.TemporaryDirectory() as ws:
         marker = Path(ws) / "marker.txt"
         marker.write_text("hello from workspace")
 
-        def check_mount(p: Path) -> None:
+        def check_workspace(p: Path) -> None:
             m = p / "marker.txt"
             if not m.exists() or m.read_text() != "hello from workspace":
-                raise RuntimeError("Workspace not mounted correctly")
+                raise RuntimeError("Workspace not accessible")
 
-        with BranchContext(check_mount, Path(ws)) as ctx:
+        with BranchContext(check_workspace, Path(ws)) as ctx:
             ctx.wait(timeout=10.0)
 
 
-@needs_userns
 def test_create_multiple():
     """BranchContext.create() starts N contexts as a context manager."""
     def noop(p: Path) -> None:

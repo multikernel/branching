@@ -84,6 +84,11 @@ class Branch:
         return self._path
 
     @property
+    def mount_root(self) -> Path:
+        """Filesystem mount root (branch virtual paths are relative to this)."""
+        return self._mount_root
+
+    @property
     def branch_path(self) -> str:
         """Full branch path (e.g., '/main/feature')."""
         if self._parent_branch in ("main", "/main"):

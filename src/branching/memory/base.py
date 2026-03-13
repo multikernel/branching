@@ -59,24 +59,23 @@ class MemoryBackend(ABC):
 class StubMemoryBackend(MemoryBackend):
     """Stub implementation that raises NotImplementedError.
 
-    Memory branching requires kernel support via the proposed branch()
-    syscall. See the BranchFS paper for the design of BR_MEMORY.
+    Full memory branching (COW snapshots of address space regions)
+    requires kernel support that is not yet available.
     """
 
     def snapshot(self, addr: int, size: int) -> Any:
         raise NotImplementedError(
-            "Memory branching requires kernel support via the branch() syscall. "
-            "See the BranchFS paper for the proposed BR_MEMORY design."
+            "Memory branching requires kernel support (not yet available)."
         )
 
     def restore(self, handle: Any) -> None:
         raise NotImplementedError(
-            "Memory branching requires kernel support via the branch() syscall."
+            "Memory branching requires kernel support (not yet available)."
         )
 
     def commit(self, handle: Any) -> None:
         raise NotImplementedError(
-            "Memory branching requires kernel support via the branch() syscall."
+            "Memory branching requires kernel support (not yet available)."
         )
 
 
