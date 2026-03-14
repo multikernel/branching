@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from ..core.workspace import Workspace
-from ..process.runner import run_in_process
+from ..process.runner import _default_runner, Runner
 from ..exceptions import ConflictError
 from .result import SpeculationResult, SpeculationOutcome
 
@@ -51,12 +51,14 @@ class BestOfN:
         evaluate: Callable[[Path], float] | None = None,
         timeout: float | None = None,
         commit: bool = True,
+        runner: Runner | None = None,
     ):
         self._candidates = list(candidates)
         self._scores = list(scores) if scores is not None else None
         self._evaluate = evaluate
         self._timeout = timeout
         self._commit = commit
+        self._runner = runner or _default_runner
 
     def _score(self, ret, path, index):
         """Parse candidate return and apply optional evaluator."""
@@ -87,9 +89,8 @@ class BestOfN:
                 ) as b:
                     result.branch_path = b.path
                     try:
-                        ret = run_in_process(
+                        ret = self._runner(
                             self._candidates[index], (b.path,),
-                            workspace=b.path,
                         )
                         success, score = self._score(ret, b.path, index)
                         result.success = success
@@ -182,6 +183,7 @@ class Reflexion:
         max_retries: int = 3,
         *,
         critique: Optional[Callable[[Path], str]] = None,
+        runner: Runner | None = None,
     ):
         """
         Args:
@@ -189,10 +191,13 @@ class Reflexion:
                 feedback is None on first attempt, critique output thereafter.
             max_retries: Maximum number of attempts.
             critique: Optional callable(path) -> feedback_string.
+            runner: Execution strategy for candidates. Default forks via
+                BranchContext. Pass a sandlock runner for confinement.
         """
         self._task = task
         self._max_retries = max_retries
         self._critique = critique
+        self._runner = runner or _default_runner
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
         return self._run(workspace)
@@ -211,9 +216,8 @@ class Reflexion:
                     branch_name, on_success=None, on_error="abort"
                 ) as b:
                     result.branch_path = b.path
-                    success = run_in_process(
+                    success = self._runner(
                         self._task, (b.path, attempt, feedback),
-                        workspace=b.path,
                     )
                     result.success = bool(success)
                     result.return_value = success
@@ -287,6 +291,7 @@ class TreeOfThoughts:
         ] | None = None,
         max_depth: int = 1,
         timeout: float | None = None,
+        runner: Runner | None = None,
     ):
         """
         Args:
@@ -299,12 +304,14 @@ class TreeOfThoughts:
                 Only used when max_depth > 1.
             max_depth: Maximum exploration depth (1 = single level).
             timeout: Per-level timeout in seconds.
+            runner: Execution strategy for candidates.
         """
         self._strategies = list(strategies)
         self._evaluate = evaluate
         self._expand = expand
         self._max_depth = max_depth
         self._timeout = timeout
+        self._runner = runner or _default_runner
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
         if self._expand is None or self._max_depth <= 1:
@@ -338,9 +345,8 @@ class TreeOfThoughts:
                 ) as b:
                     result.branch_path = b.path
                     try:
-                        ret = run_in_process(
+                        ret = self._runner(
                             strategies[index], (b.path,),
-                            workspace=b.path,
                         )
                         if isinstance(ret, (tuple, list)):
                             success, score = ret
@@ -506,6 +512,7 @@ class BeamSearch:
         beam_width: int = 3,
         max_depth: int = 2,
         timeout: float | None = None,
+        runner: Runner | None = None,
     ):
         self._strategies = list(strategies)
         self._expand = expand
@@ -513,6 +520,7 @@ class BeamSearch:
         self._beam_width = beam_width
         self._max_depth = max_depth
         self._timeout = timeout
+        self._runner = runner or _default_runner
 
     def _score(self, ret, path):
         """Parse strategy return and apply optional evaluator."""
@@ -563,9 +571,8 @@ class BeamSearch:
                     result.branch_path = b.path
                     beam_branches[index] = b
                     try:
-                        ret = run_in_process(
+                        ret = self._runner(
                             self._strategies[index], (b.path,),
-                            workspace=b.path,
                         )
                         result.success, result.score = self._score(
                             ret, b.path
@@ -659,9 +666,8 @@ class BeamSearch:
                         ) as sb:
                             result.branch_path = sb.path
                             try:
-                                ret = run_in_process(
+                                ret = self._runner(
                                     strategy, (sb.path,),
-                                    workspace=sb.path,
                                 )
                                 result.success, result.score = self._score(
                                     ret, sb.path
@@ -775,6 +781,7 @@ class Tournament:
         *,
         judge: Callable[[Path, Path], int],
         timeout: float | None = None,
+        runner: Runner | None = None,
     ):
         """
         Args:
@@ -784,10 +791,12 @@ class Tournament:
             judge: Callable(path_a, path_b) -> 0 (a wins) or 1 (b wins).
                    Compares two candidates' branches during elimination.
             timeout: Overall timeout in seconds.
+            runner: Execution strategy for candidates.
         """
         self._candidates = list(candidates)
         self._judge = judge
         self._timeout = timeout
+        self._runner = runner or _default_runner
 
     @staticmethod
     def _run_bracket(
@@ -830,9 +839,8 @@ class Tournament:
                     result.branch_path = b.path
                     branch_paths[index] = b.path
                     try:
-                        success = run_in_process(
+                        success = self._runner(
                             self._candidates[index], (b.path,),
-                            workspace=b.path,
                         )
                         result.success = bool(success)
                         result.return_value = success
@@ -940,6 +948,7 @@ class Cascaded:
         fan_out: Sequence[int] = (1, 2, 4),
         timeout: float | None = None,
         wave_timeout: float | None = None,
+        runner: Runner | None = None,
     ):
         """
         Args:
@@ -955,11 +964,13 @@ class Cascaded:
                 ``len(fan_out)``.
             timeout: Overall timeout in seconds across all waves.
             wave_timeout: Per-wave timeout in seconds.
+            runner: Execution strategy for candidates.
         """
         self._task = task
         self._fan_out = list(fan_out)
         self._timeout = timeout
         self._wave_timeout = wave_timeout
+        self._runner = runner or _default_runner
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
         return self._run(workspace)
@@ -1123,14 +1134,13 @@ class Cascaded:
         feedback: list[str],
         timeout: Optional[float] = None,
     ) -> tuple[bool, str]:
-        """Run the task in a forked child."""
+        """Run the task via the configured runner."""
         from ..exceptions import ProcessBranchError
 
         try:
-            ret = run_in_process(
+            ret = self._runner(
                 self._task,
                 (path, feedback),
-                workspace=path,
                 timeout=timeout,
             )
             if isinstance(ret, (tuple, list)):

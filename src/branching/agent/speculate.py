@@ -9,6 +9,7 @@ from typing import Callable, Sequence, Optional
 import threading
 
 from ..core.workspace import Workspace
+from ..process.runner import _default_runner, Runner
 from ..exceptions import ConflictError
 from .result import SpeculationResult, SpeculationOutcome
 
@@ -32,6 +33,7 @@ class Speculate:
         first_wins: bool = True,
         max_parallel: int | None = None,
         timeout: float | None = None,
+        runner: Runner | None = None,
     ):
         """
         Args:
@@ -41,11 +43,14 @@ class Speculate:
                 abort siblings. If False, run all and commit the first success.
             max_parallel: Maximum parallel workers (default: len(candidates)).
             timeout: Overall timeout in seconds for all candidates.
+            runner: Execution strategy for candidates. Default forks via
+                BranchContext. Pass a sandlock runner for confinement.
         """
         self._candidates = list(candidates)
         self._first_wins = first_wins
         self._max_parallel = max_parallel or len(self._candidates)
         self._timeout = timeout
+        self._runner = runner or _default_runner
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
         return self._run(workspace)
@@ -140,8 +145,7 @@ class Speculate:
         )
 
     def _run_in_branch(self, path: Path, index: int) -> bool:
-        """Run a candidate in a forked child."""
-        from ..process.runner import run_in_process
+        """Run a candidate via the configured runner."""
         from ..exceptions import ProcessBranchError
 
         per_candidate = (
@@ -151,10 +155,9 @@ class Speculate:
         )
 
         try:
-            result = run_in_process(
+            result = self._runner(
                 self._candidates[index],
                 (path,),
-                workspace=path,
                 timeout=per_candidate,
             )
             return bool(result)

@@ -13,12 +13,12 @@ from branching.agent.result import SpeculationResult, SpeculationOutcome
 
 
 @pytest.fixture(autouse=True)
-def mock_run_in_process():
+def mock_runner():
     """Run tasks in-process for unit tests (skip fork)."""
-    def _run_inline(fn, args, workspace, **kwargs):
+    def _run_inline(fn, args, **kwargs):
         return fn(*args)
-    with patch("branching.agent.patterns.run_in_process", _run_inline), \
-         patch("branching.process.runner.run_in_process", _run_inline):
+    with patch("branching.agent.patterns._default_runner", _run_inline), \
+         patch("branching.agent.speculate._default_runner", _run_inline):
         yield
 
 

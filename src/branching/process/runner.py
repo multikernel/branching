@@ -11,6 +11,16 @@ from typing import Any, Callable
 from ..exceptions import ProcessBranchError
 from .context import BranchContext
 
+# Runner protocol: (fn, args, *, timeout) -> Any
+# Used by agent patterns to execute candidates. Swappable to use
+# sandlock or run candidates directly without forking.
+Runner = Callable[..., Any]
+
+
+def _default_runner(fn: Callable, args: tuple, *, timeout: float | None = None) -> Any:
+    """Default runner: fork via BranchContext, pass result via pipe."""
+    return run_in_process(fn, args, workspace=args[0], timeout=timeout)
+
 
 def run_in_process(
     fn: Callable,
