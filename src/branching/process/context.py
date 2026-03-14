@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
-from ..exceptions import ForkError, MemoryProtectError, ProcessBranchError
+from ..exceptions import ForkError, ProcessBranchError
 from ..memory._mprotect import (
     MemoryRegion,
     PROT_READ,
@@ -42,7 +42,6 @@ class BranchContext:
         target: Callable[[Path], None],
         workspace: Path,
         *,
-        mount_root: Path | None = None,
         close_fds: bool = False,
         protected_regions: Sequence[tuple[int, int]] | None = None,
     ):
@@ -51,8 +50,6 @@ class BranchContext:
             target: Callable receiving workspace path. Return normally for
                     success, raise for failure.
             workspace: Branch workspace path (BranchFS virtual path).
-            mount_root: Filesystem mount root (kept for API compatibility
-                with callers that pass it through).
             close_fds: Close inherited fds (3+) in child.
             protected_regions: Optional list of (addr, size) tuples.
                 After fork, these regions are marked read-only in the
@@ -60,7 +57,6 @@ class BranchContext:
         """
         self._target = target
         self._workspace = workspace
-        self._mount_root = mount_root or workspace.parent
         self._close_fds = close_fds
         self._protected_regions = protected_regions
         self._pid: Optional[int] = None
@@ -242,7 +238,6 @@ class BranchContext:
         targets: Sequence[Callable[[Path], None]],
         workspaces: Sequence[Path],
         *,
-        mount_root: Path | None = None,
         close_fds: bool = False,
         protected_regions: Sequence[tuple[int, int]] | None = None,
     ) -> Iterator[list["BranchContext"]]:
@@ -253,7 +248,6 @@ class BranchContext:
         Args:
             targets: Sequence of callables, each receiving a workspace Path.
             workspaces: Sequence of workspace Paths, one per target.
-            mount_root: Filesystem mount root.
             close_fds: Close inherited fds in children.
             protected_regions: Optional list of (addr, size) tuples to
                 mark read-only in the parent after each fork.
@@ -268,7 +262,7 @@ class BranchContext:
         try:
             for target, workspace in zip(targets, workspaces):
                 ctx = BranchContext(
-                    target, workspace, mount_root=mount_root,
+                    target, workspace,
                     close_fds=close_fds,
                     protected_regions=protected_regions,
                 )

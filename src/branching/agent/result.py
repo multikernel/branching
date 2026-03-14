@@ -14,7 +14,6 @@ class SpeculationResult:
     success: bool
     return_value: Any = None
     exception: Optional[Exception] = None
-    exit_code: int = 0
     branch_path: Optional[Path] = None
     score: float = 0.0
 

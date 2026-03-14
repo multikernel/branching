@@ -89,7 +89,7 @@ class BestOfN:
                     try:
                         ret = run_in_process(
                             self._candidates[index], (b.path,),
-                            workspace=b.path, mount_root=b.mount_root,
+                            workspace=b.path,
                         )
                         success, score = self._score(ret, b.path, index)
                         result.success = success
@@ -213,7 +213,7 @@ class Reflexion:
                     result.branch_path = b.path
                     success = run_in_process(
                         self._task, (b.path, attempt, feedback),
-                        workspace=b.path, mount_root=b.mount_root,
+                        workspace=b.path,
                     )
                     result.success = bool(success)
                     result.return_value = success
@@ -340,7 +340,7 @@ class TreeOfThoughts:
                     try:
                         ret = run_in_process(
                             strategies[index], (b.path,),
-                            workspace=b.path, mount_root=b.mount_root,
+                            workspace=b.path,
                         )
                         if isinstance(ret, (tuple, list)):
                             success, score = ret
@@ -565,7 +565,7 @@ class BeamSearch:
                     try:
                         ret = run_in_process(
                             self._strategies[index], (b.path,),
-                            workspace=b.path, mount_root=b.mount_root,
+                            workspace=b.path,
                         )
                         result.success, result.score = self._score(
                             ret, b.path
@@ -661,7 +661,7 @@ class BeamSearch:
                             try:
                                 ret = run_in_process(
                                     strategy, (sb.path,),
-                                    workspace=sb.path, mount_root=sb.mount_root,
+                                    workspace=sb.path,
                                 )
                                 result.success, result.score = self._score(
                                     ret, sb.path
@@ -832,7 +832,7 @@ class Tournament:
                     try:
                         success = run_in_process(
                             self._candidates[index], (b.path,),
-                            workspace=b.path, mount_root=b.mount_root,
+                            workspace=b.path,
                         )
                         result.success = bool(success)
                         result.return_value = success
@@ -1046,8 +1046,7 @@ class Cascaded:
                         return result
 
                     success, error_ctx = self._run_task(
-                        b.path, b.mount_root, feedback,
-                        timeout=wt,
+                        b.path, feedback, timeout=wt,
                     )
 
                     result.success = bool(success)
@@ -1121,7 +1120,6 @@ class Cascaded:
     def _run_task(
         self,
         path: Path,
-        mount_root: Path,
         feedback: list[str],
         timeout: Optional[float] = None,
     ) -> tuple[bool, str]:
@@ -1133,7 +1131,6 @@ class Cascaded:
                 self._task,
                 (path, feedback),
                 workspace=path,
-                mount_root=mount_root,
                 timeout=timeout,
             )
             if isinstance(ret, (tuple, list)):

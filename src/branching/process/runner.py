@@ -17,9 +17,7 @@ def run_in_process(
     args: tuple,
     workspace: Path,
     *,
-    mount_root: Path | None = None,
     timeout: float | None = None,
-    pid_callback: Callable[[int], None] | None = None,
 ) -> Any:
     """Run *fn(*args)* in a forked child process.
 
@@ -30,11 +28,7 @@ def run_in_process(
         fn: Callable to execute.
         args: Positional arguments for *fn*.
         workspace: Branch workspace path (passed to BranchContext).
-        mount_root: Filesystem mount root.
         timeout: Maximum seconds to wait for the child.
-        pid_callback: Optional callback invoked with the child PID
-            after the branch is created.  Allows callers to track live
-            branch PIDs for external kill.
 
     Returns:
         Whatever *fn* returned.
@@ -61,12 +55,10 @@ def run_in_process(
 
     try:
         with BranchContext(
-            _target, workspace=workspace, mount_root=mount_root,
+            _target, workspace=workspace,
         ) as ctx:
             os.close(write_fd)
             write_fd = -1  # prevent double-close in except branch
-            if pid_callback is not None:
-                pid_callback(ctx.pid)
             try:
                 ctx.wait(timeout=timeout)
             except ProcessBranchError:

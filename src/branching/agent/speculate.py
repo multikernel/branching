@@ -73,9 +73,7 @@ class Speculate:
                         b.abort()
                         return result
 
-                    success = self._run_in_branch(
-                        b.path, b.mount_root, index,
-                    )
+                    success = self._run_in_branch(b.path, index)
 
                     result.success = bool(success)
                     result.return_value = success
@@ -141,9 +139,7 @@ class Speculate:
             committed=committed,
         )
 
-    def _run_in_branch(
-        self, path: Path, mount_root: Path, index: int,
-    ) -> bool:
+    def _run_in_branch(self, path: Path, index: int) -> bool:
         """Run a candidate in a forked child."""
         from ..process.runner import run_in_process
         from ..exceptions import ProcessBranchError
@@ -159,7 +155,6 @@ class Speculate:
                 self._candidates[index],
                 (path,),
                 workspace=path,
-                mount_root=mount_root,
                 timeout=per_candidate,
             )
             return bool(result)
