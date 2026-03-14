@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "BranchContext"
-version = "0.2.0"
+version = "0.3.0"
 description = "Unified branching for speculative execution: filesystem, process, and memory"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -25,9 +25,6 @@ branching = "cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-"branching.process.bpf" = ["*.bpf.o"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
