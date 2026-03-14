@@ -3,8 +3,8 @@
 BranchContext - Unified branching for speculative execution.
 
 Supports filesystem branching (BranchFS FUSE), process branching
-(fork + Landlock + BPF LSM), and AI agent integration patterns
-(speculation, best-of-N, reflexion, tree-of-thoughts).
+(fork + mprotect), and AI agent integration patterns (speculation,
+best-of-N, reflexion, tree-of-thoughts).
 
 Layers are loaded lazily — importing only what you need avoids pulling
 in unrelated dependencies:
@@ -44,7 +44,6 @@ __all__ = [
     "Branch",
     # Process
     "BranchContext",
-    "ResourceLimits",
     # Agent patterns
     "Speculate",
     "BestOfN",
@@ -79,7 +78,6 @@ _LAZY_IMPORTS = {
     "Branch": ".core.branch",
     # Process layer
     "BranchContext": ".process.context",
-    "ResourceLimits": ".process.limits",
     # Agent layer
     "Speculate": ".agent.speculate",
     "BestOfN": ".agent.patterns",

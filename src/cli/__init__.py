@@ -82,78 +82,6 @@ def _print_error(message: str, args: argparse.Namespace) -> None:
         print(f"error: {message}", file=sys.stderr)
 
 
-def _add_resource_limit_args(parser: argparse.ArgumentParser) -> None:
-    """Add per-branch resource limit flags to a subparser."""
-    parser.add_argument(
-        "--memory-limit",
-        default=None,
-        metavar="SIZE",
-        help="Per-branch virtual address space limit (e.g. 512M, 1G). Applied via RLIMIT_AS.",
-    )
-    parser.add_argument(
-        "--cpu-time-limit",
-        type=int,
-        default=None,
-        metavar="SECS",
-        help="Per-branch CPU time budget in seconds. Applied via RLIMIT_CPU.",
-    )
-    parser.add_argument(
-        "--nproc-limit",
-        type=int,
-        default=None,
-        metavar="N",
-        help="Max number of processes per branch. Applied via RLIMIT_NPROC.",
-    )
-
-
-def _add_group_limit_args(parser: argparse.ArgumentParser) -> None:
-    """Add group-level resource limit flags to a subparser."""
-    parser.add_argument(
-        "--group-memory-limit",
-        default=None,
-        metavar="SIZE",
-        help="Total virtual address space budget for all branches (RLIMIT_AS).",
-    )
-    parser.add_argument(
-        "--group-cpu-time-limit",
-        type=int,
-        default=None,
-        metavar="SECS",
-        help="Total CPU time budget for all branches in seconds (RLIMIT_CPU).",
-    )
-    parser.add_argument(
-        "--group-nproc-limit",
-        type=int,
-        default=None,
-        metavar="N",
-        help="Max processes across all branches (RLIMIT_NPROC).",
-    )
-
-
-def _parse_resource_limits(args: argparse.Namespace):
-    """Parse per-branch resource limit flags into a ResourceLimits or None."""
-    mem_str = getattr(args, "memory_limit", None)
-    cpu_time = getattr(args, "cpu_time_limit", None)
-    nproc = getattr(args, "nproc_limit", None)
-    if mem_str is None and cpu_time is None and nproc is None:
-        return None
-    from branching.process.limits import ResourceLimits, parse_memory_size
-    memory = parse_memory_size(mem_str) if mem_str is not None else None
-    return ResourceLimits(memory=memory, cpu_time=cpu_time, nproc=nproc)
-
-
-def _parse_group_limits(args: argparse.Namespace):
-    """Parse group-level resource limit flags into a ResourceLimits or None."""
-    mem_str = getattr(args, "group_memory_limit", None)
-    cpu_time = getattr(args, "group_cpu_time_limit", None)
-    nproc = getattr(args, "group_nproc_limit", None)
-    if mem_str is None and cpu_time is None and nproc is None:
-        return None
-    from branching.process.limits import ResourceLimits, parse_memory_size
-    memory = parse_memory_size(mem_str) if mem_str is not None else None
-    return ResourceLimits(memory=memory, cpu_time=cpu_time, nproc=nproc)
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="branching",
@@ -183,7 +111,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Prompt to commit/abort instead of auto-deciding",
     )
     p_run.add_argument("--json", action="store_true", help="JSON output")
-    _add_resource_limit_args(p_run)
     p_run.add_argument("cmd", nargs=argparse.REMAINDER, metavar="CMD",
                         help="Command to run (after --)")
 
@@ -204,8 +131,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_spec.add_argument("--timeout", type=float, default=None, help="Timeout in seconds")
     p_spec.add_argument("--json", action="store_true", help="JSON output")
-    _add_resource_limit_args(p_spec)
-    _add_group_limit_args(p_spec)
 
     # --- best-of-n ---
     p_bon = sub.add_parser(
@@ -217,8 +142,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_bon.add_argument("-n", type=int, default=3, help="Number of parallel attempts (default: 3)")
     p_bon.add_argument("--timeout", type=float, default=None, help="Timeout in seconds")
     p_bon.add_argument("--json", action="store_true", help="JSON output")
-    _add_resource_limit_args(p_bon)
-    _add_group_limit_args(p_bon)
     p_bon.add_argument("cmd", nargs=argparse.REMAINDER, metavar="CMD",
                         help="Command to run (after --)")
 
@@ -233,8 +156,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_refl.add_argument("--critique", type=str, default=None,
                          help="Shell command to generate feedback after failure")
     p_refl.add_argument("--json", action="store_true", help="JSON output")
-    _add_resource_limit_args(p_refl)
-    _add_group_limit_args(p_refl)
     p_refl.add_argument("cmd", nargs=argparse.REMAINDER, metavar="CMD",
                          help="Command to run (after --)")
 

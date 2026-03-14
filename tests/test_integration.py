@@ -12,17 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from branching.process._landlock import landlock_abi_version
-
 
 needs_branchfs = pytest.mark.skipif(
     not os.environ.get("BRANCHFS_MOUNT"),
     reason="BRANCHFS_MOUNT not set (no live branchfs)",
-)
-
-needs_landlock = pytest.mark.skipif(
-    landlock_abi_version() < 1,
-    reason="Kernel does not support Landlock",
 )
 
 
@@ -107,7 +100,6 @@ def test_sibling_branches_first_wins(ws):
 
 
 @needs_branchfs
-@needs_landlock
 def test_speculate_parallel(ws):
     """Speculate runs candidates in parallel, commits the winner."""
     from branching import Speculate
@@ -129,7 +121,6 @@ def test_speculate_parallel(ws):
 
 
 @needs_branchfs
-@needs_landlock
 def test_tree_of_thoughts_multi_level(ws):
     """TreeOfThoughts with expand commits accumulated state across levels."""
     from branching import TreeOfThoughts

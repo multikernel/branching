@@ -7,15 +7,12 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Callable, Optional, Sequence, TYPE_CHECKING
+from typing import Callable, Optional, Sequence
 
 from ..core.workspace import Workspace
 from ..process.runner import run_in_process
 from ..exceptions import ConflictError
 from .result import SpeculationResult, SpeculationOutcome
-
-if TYPE_CHECKING:
-    from ..process.limits import ResourceLimits
 
 
 class BestOfN:
@@ -53,16 +50,12 @@ class BestOfN:
         scores: Sequence[float] | None = None,
         evaluate: Callable[[Path], float] | None = None,
         timeout: float | None = None,
-        resource_limits: ResourceLimits | None = None,
-        group_limits: ResourceLimits | None = None,
         commit: bool = True,
     ):
         self._candidates = list(candidates)
         self._scores = list(scores) if scores is not None else None
         self._evaluate = evaluate
         self._timeout = timeout
-        self._resource_limits = resource_limits
-        self._group_limits = group_limits
         self._commit = commit
 
     def _score(self, ret, path, index):
@@ -77,11 +70,6 @@ class BestOfN:
         return bool(success), score
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
-        # Apply group-level limits to this process (inherited by all forks)
-        if self._group_limits is not None:
-            from ..process._prlimit import apply_limits
-            apply_limits(self._group_limits)
-
         return self._run(workspace)
 
     def _run(self, workspace: Workspace) -> SpeculationOutcome:
@@ -91,15 +79,6 @@ class BestOfN:
         decision_ready = [threading.Event() for _ in range(n)]
         decisions = ["abort"] * n  # default: abort; main overwrites winner
 
-        branch_pids: dict[int, int] = {}
-
-        def _kill_branches(exclude: int = -1) -> None:
-            from ..process._process_tracker import BpfProcessTracker
-            tracker = BpfProcessTracker.get()
-            for idx, pid in list(branch_pids.items()):
-                if idx != exclude:
-                    tracker.kill_branch(pid)
-
         def _run_candidate(index: int) -> None:
             result = SpeculationResult(branch_index=index, success=False)
             try:
@@ -108,14 +87,9 @@ class BestOfN:
                 ) as b:
                     result.branch_path = b.path
                     try:
-                        def _on_pid(pid: int, _i: int = index) -> None:
-                            branch_pids[_i] = pid
-
                         ret = run_in_process(
                             self._candidates[index], (b.path,),
                             workspace=b.path, mount_root=b.mount_root,
-                            limits=self._resource_limits,
-                            pid_callback=_on_pid if self._resource_limits else None,
                         )
                         success, score = self._score(ret, b.path, index)
                         result.success = success
@@ -170,11 +144,6 @@ class BestOfN:
             if best_idx is not None and self._commit:
                 decisions[best_idx] = "commit"
 
-            # Kill still-running tasks (only useful when timeout left
-            # some workers stuck in ctx.wait — a no-op otherwise).
-            if any(r is None for r in results):
-                _kill_branches(best_idx if best_idx is not None else -1)
-
             # Release all threads to commit/abort
             for ev in decision_ready:
                 ev.set()
@@ -213,8 +182,6 @@ class Reflexion:
         max_retries: int = 3,
         *,
         critique: Optional[Callable[[Path], str]] = None,
-        resource_limits: ResourceLimits | None = None,
-        group_limits: ResourceLimits | None = None,
     ):
         """
         Args:
@@ -222,21 +189,12 @@ class Reflexion:
                 feedback is None on first attempt, critique output thereafter.
             max_retries: Maximum number of attempts.
             critique: Optional callable(path) -> feedback_string.
-            resource_limits: Optional per-branch resource limits.
-            group_limits: Optional resource limits applied to this process.
         """
         self._task = task
         self._max_retries = max_retries
         self._critique = critique
-        self._resource_limits = resource_limits
-        self._group_limits = group_limits
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
-        # Apply group-level limits to this process (inherited by all forks)
-        if self._group_limits is not None:
-            from ..process._prlimit import apply_limits
-            apply_limits(self._group_limits)
-
         return self._run(workspace)
 
     def _run(self, workspace: Workspace) -> SpeculationOutcome:
@@ -256,7 +214,6 @@ class Reflexion:
                     success = run_in_process(
                         self._task, (b.path, attempt, feedback),
                         workspace=b.path, mount_root=b.mount_root,
-                        limits=self._resource_limits,
                     )
                     result.success = bool(success)
                     result.return_value = success
@@ -330,8 +287,6 @@ class TreeOfThoughts:
         ] | None = None,
         max_depth: int = 1,
         timeout: float | None = None,
-        resource_limits: ResourceLimits | None = None,
-        group_limits: ResourceLimits | None = None,
     ):
         """
         Args:
@@ -344,23 +299,14 @@ class TreeOfThoughts:
                 Only used when max_depth > 1.
             max_depth: Maximum exploration depth (1 = single level).
             timeout: Per-level timeout in seconds.
-            resource_limits: Optional per-branch resource limits.
-            group_limits: Optional resource limits applied to this process.
         """
         self._strategies = list(strategies)
         self._evaluate = evaluate
         self._expand = expand
         self._max_depth = max_depth
         self._timeout = timeout
-        self._resource_limits = resource_limits
-        self._group_limits = group_limits
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
-        # Apply group-level limits to this process (inherited by all forks)
-        if self._group_limits is not None:
-            from ..process._prlimit import apply_limits
-            apply_limits(self._group_limits)
-
         if self._expand is None or self._max_depth <= 1:
             return self._single_level(
                 workspace, self._strategies, depth=0,
@@ -384,15 +330,6 @@ class TreeOfThoughts:
         decision_ready = [threading.Event() for _ in range(n)]
         decisions = ["abort"] * n
 
-        branch_pids: dict[int, int] = {}
-
-        def _kill_branches(exclude: int = -1) -> None:
-            from ..process._process_tracker import BpfProcessTracker
-            tracker = BpfProcessTracker.get()
-            for idx, pid in list(branch_pids.items()):
-                if idx != exclude:
-                    tracker.kill_branch(pid)
-
         def _run(index: int) -> None:
             result = SpeculationResult(branch_index=index, success=False)
             try:
@@ -401,14 +338,9 @@ class TreeOfThoughts:
                 ) as b:
                     result.branch_path = b.path
                     try:
-                        def _on_pid(pid: int, _i: int = index) -> None:
-                            branch_pids[_i] = pid
-
                         ret = run_in_process(
                             strategies[index], (b.path,),
                             workspace=b.path, mount_root=b.mount_root,
-                            limits=self._resource_limits,
-                            pid_callback=_on_pid if self._resource_limits else None,
                         )
                         if isinstance(ret, (tuple, list)):
                             success, score = ret
@@ -461,9 +393,6 @@ class TreeOfThoughts:
 
             if best_idx is not None:
                 decisions[best_idx] = "commit"
-
-            if any(r is None for r in results):
-                _kill_branches(best_idx if best_idx is not None else -1)
 
             for ev in decision_ready:
                 ev.set()
@@ -577,8 +506,6 @@ class BeamSearch:
         beam_width: int = 3,
         max_depth: int = 2,
         timeout: float | None = None,
-        resource_limits: ResourceLimits | None = None,
-        group_limits: ResourceLimits | None = None,
     ):
         self._strategies = list(strategies)
         self._expand = expand
@@ -586,8 +513,6 @@ class BeamSearch:
         self._beam_width = beam_width
         self._max_depth = max_depth
         self._timeout = timeout
-        self._resource_limits = resource_limits
-        self._group_limits = group_limits
 
     def _score(self, ret, path):
         """Parse strategy return and apply optional evaluator."""
@@ -614,11 +539,6 @@ class BeamSearch:
         if n == 0:
             return SpeculationOutcome()
 
-        # Apply group-level limits to this process (inherited by all forks)
-        if self._group_limits is not None:
-            from ..process._prlimit import apply_limits
-            apply_limits(self._group_limits)
-
         return self._run(workspace, n)
 
     def _run(
@@ -626,16 +546,6 @@ class BeamSearch:
     ) -> SpeculationOutcome:
         K = self._beam_width
         all_results: list[SpeculationResult] = []
-
-        # Track child PIDs for kill-on-prune.
-        beam_pids: dict[int, int] = {}
-
-        def _kill_beams(keep: set[int]) -> None:
-            from ..process._process_tracker import BpfProcessTracker
-            tracker = BpfProcessTracker.get()
-            for idx, pid in list(beam_pids.items()):
-                if idx not in keep:
-                    tracker.kill_branch(pid)
 
         # -- Level 0: create beam branches from workspace ----------------
         beam_branches: list[Optional[object]] = [None] * n
@@ -653,14 +563,9 @@ class BeamSearch:
                     result.branch_path = b.path
                     beam_branches[index] = b
                     try:
-                        def _on_pid(pid: int, _i: int = index) -> None:
-                            beam_pids[_i] = pid
-
                         ret = run_in_process(
                             self._strategies[index], (b.path,),
                             workspace=b.path, mount_root=b.mount_root,
-                            limits=self._resource_limits,
-                            pid_callback=_on_pid if self._resource_limits else None,
                         )
                         result.success, result.score = self._score(
                             ret, b.path
@@ -712,9 +617,6 @@ class BeamSearch:
                 for i, r in enumerate(level0_results)
             )
 
-            # Kill timed-out beams (no-op when all tasks finished).
-            if any(r is None for r in level0_results):
-                _kill_beams(survivors)
             for i in range(n):
                 if i not in survivors:
                     final_actions[i] = "abort"
@@ -741,7 +643,6 @@ class BeamSearch:
                 sub_done = [threading.Event() for _ in range(m)]
                 sub_decision_ready = [threading.Event() for _ in range(m)]
                 sub_decisions = ["abort"] * m
-                sub_pids: dict[int, int] = {}
                 _depth = depth  # capture value for closure
 
                 def _sub_worker(idx: int, _d: int = _depth) -> None:
@@ -758,16 +659,9 @@ class BeamSearch:
                         ) as sb:
                             result.branch_path = sb.path
                             try:
-                                def _on_sub_pid(
-                                    pid: int, _j: int = idx,
-                                ) -> None:
-                                    sub_pids[_j] = pid
-
                                 ret = run_in_process(
                                     strategy, (sb.path,),
                                     workspace=sb.path, mount_root=sb.mount_root,
-                                    limits=self._resource_limits,
-                                    pid_callback=_on_sub_pid if self._resource_limits else None,
                                 )
                                 result.success, result.score = self._score(
                                     ret, sb.path
@@ -809,14 +703,6 @@ class BeamSearch:
                         else SpeculationResult(branch_index=i, success=False)
                         for i, r in enumerate(sub_results)
                     )
-
-                    # Kill timed-out sub-branches (no-op when all finished).
-                    if any(r is None for r in sub_results):
-                        from ..process._process_tracker import BpfProcessTracker
-                        _tracker = BpfProcessTracker.get()
-                        for si, pid in list(sub_pids.items()):
-                            if si not in top_k_indices:
-                                _tracker.kill_branch(pid)
 
                     for i in top_k_indices:
                         sub_decisions[i] = "commit"
@@ -889,25 +775,19 @@ class Tournament:
         *,
         judge: Callable[[Path, Path], int],
         timeout: float | None = None,
-        resource_limits: ResourceLimits | None = None,
-        group_limits: ResourceLimits | None = None,
     ):
         """
         Args:
             candidates: Callables that take a Path (branch working dir)
                   and return True on success. Each produces output in
                   the branch directory for the judge to compare.
-            judge: Callable(path_a, path_b) → 0 (a wins) or 1 (b wins).
+            judge: Callable(path_a, path_b) -> 0 (a wins) or 1 (b wins).
                    Compares two candidates' branches during elimination.
             timeout: Overall timeout in seconds.
-            resource_limits: Optional per-branch resource limits.
-            group_limits: Optional resource limits applied to this process.
         """
         self._candidates = list(candidates)
         self._judge = judge
         self._timeout = timeout
-        self._resource_limits = resource_limits
-        self._group_limits = group_limits
 
     @staticmethod
     def _run_bracket(
@@ -931,11 +811,6 @@ class Tournament:
         return survivors[0]
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
-        # Apply group-level limits to this process (inherited by all forks)
-        if self._group_limits is not None:
-            from ..process._prlimit import apply_limits
-            apply_limits(self._group_limits)
-
         return self._run(workspace)
 
     def _run(self, workspace: Workspace) -> SpeculationOutcome:
@@ -946,15 +821,6 @@ class Tournament:
         decision_ready = [threading.Event() for _ in range(n)]
         decisions = ["abort"] * n
 
-        branch_pids: dict[int, int] = {}
-
-        def _kill_branches(exclude: int = -1) -> None:
-            from ..process._process_tracker import BpfProcessTracker
-            tracker = BpfProcessTracker.get()
-            for idx, pid in list(branch_pids.items()):
-                if idx != exclude:
-                    tracker.kill_branch(pid)
-
         def _run_candidate(index: int) -> None:
             result = SpeculationResult(branch_index=index, success=False)
             try:
@@ -964,14 +830,9 @@ class Tournament:
                     result.branch_path = b.path
                     branch_paths[index] = b.path
                     try:
-                        def _on_pid(pid: int, _i: int = index) -> None:
-                            branch_pids[_i] = pid
-
                         success = run_in_process(
                             self._candidates[index], (b.path,),
                             workspace=b.path, mount_root=b.mount_root,
-                            limits=self._resource_limits,
-                            pid_callback=_on_pid if self._resource_limits else None,
                         )
                         result.success = bool(success)
                         result.return_value = success
@@ -1027,9 +888,6 @@ class Tournament:
             if winner_idx is not None:
                 decisions[winner_idx] = "commit"
 
-            if any(r is None for r in results):
-                _kill_branches(winner_idx if winner_idx is not None else -1)
-
             # Release all threads
             for ev in decision_ready:
                 ev.set()
@@ -1082,8 +940,6 @@ class Cascaded:
         fan_out: Sequence[int] = (1, 2, 4),
         timeout: float | None = None,
         wave_timeout: float | None = None,
-        resource_limits: ResourceLimits | None = None,
-        group_limits: ResourceLimits | None = None,
     ):
         """
         Args:
@@ -1099,22 +955,13 @@ class Cascaded:
                 ``len(fan_out)``.
             timeout: Overall timeout in seconds across all waves.
             wave_timeout: Per-wave timeout in seconds.
-            resource_limits: Optional per-branch resource limits.
-            group_limits: Optional resource limits applied to this process.
         """
         self._task = task
         self._fan_out = list(fan_out)
         self._timeout = timeout
         self._wave_timeout = wave_timeout
-        self._resource_limits = resource_limits
-        self._group_limits = group_limits
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
-        # Apply group-level limits to this process (inherited by all forks)
-        if self._group_limits is not None:
-            from ..process._prlimit import apply_limits
-            apply_limits(self._group_limits)
-
         return self._run(workspace)
 
     def _run(
@@ -1172,15 +1019,6 @@ class Cascaded:
         committed = False
         cancel_event = threading.Event()
 
-        branch_pids: dict[int, int] = {}
-
-        def _kill_branches(exclude: int = -1) -> None:
-            from ..process._process_tracker import BpfProcessTracker
-            tracker = BpfProcessTracker.get()
-            for idx, pid in list(branch_pids.items()):
-                if idx != exclude:
-                    tracker.kill_branch(pid)
-
         # Compute effective wave timeout.
         wt = self._wave_timeout
         if deadline is not None:
@@ -1207,12 +1045,8 @@ class Cascaded:
                         b.abort()
                         return result
 
-                    def _on_pid(pid: int, _i: int = index) -> None:
-                        branch_pids[_i] = pid
-
                     success, error_ctx = self._run_task(
                         b.path, b.mount_root, feedback,
-                        pid_callback=_on_pid if self._resource_limits else None,
                         timeout=wt,
                     )
 
@@ -1221,7 +1055,6 @@ class Cascaded:
 
                     if result.success and not cancel_event.is_set():
                         cancel_event.set()
-                        _kill_branches(index)
                         try:
                             b.commit()
                         except ConflictError:
@@ -1265,7 +1098,6 @@ class Cascaded:
                         committed = True
             except TimeoutError:
                 cancel_event.set()
-                _kill_branches()
 
             for f in futures:
                 if not f.done():
@@ -1291,10 +1123,9 @@ class Cascaded:
         path: Path,
         mount_root: Path,
         feedback: list[str],
-        pid_callback=None,
         timeout: Optional[float] = None,
     ) -> tuple[bool, str]:
-        """Run the task in a forked child with resource limits."""
+        """Run the task in a forked child."""
         from ..exceptions import ProcessBranchError
 
         try:
@@ -1303,9 +1134,7 @@ class Cascaded:
                 (path, feedback),
                 workspace=path,
                 mount_root=mount_root,
-                limits=self._resource_limits,
                 timeout=timeout,
-                pid_callback=pid_callback,
             )
             if isinstance(ret, (tuple, list)):
                 success, error_ctx = ret

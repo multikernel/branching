@@ -356,17 +356,20 @@ with ws.branch("strategy_a") as a:
     # a auto-commits into main on success
 ```
 
-### Process isolation
+### Process forking
 
-For untrusted or crash-prone agent code, `BranchContext` runs each task in
-a sandboxed child process confined to its own branch via Landlock. No root
-needed.
+For crash-prone agent code, `BranchContext` runs each task in a forked child
+process with its own process group. The child is automatically killed on
+timeout or context exit.
+
+For sandboxing (filesystem confinement, resource limits, syscall filtering),
+combine with [sandlock](https://github.com/multikernel/sandlock).
 
 ```python
 from branching import BranchContext
 
-with ws.branch("sandboxed", on_success=None, on_error=None) as fb:
-    with BranchContext(run_untrusted, workspace=fb.path) as ctx:
+with ws.branch("forked", on_success=None, on_error=None) as fb:
+    with BranchContext(run_agent, workspace=fb.path) as ctx:
         try:
             ctx.wait(timeout=30)
             fb.commit()
@@ -374,7 +377,7 @@ with ws.branch("sandboxed", on_success=None, on_error=None) as fb:
             fb.abort()
 ```
 
-Run N tasks in parallel, each in its own sandbox:
+Run N tasks in parallel, each in its own forked process:
 
 ```python
 with BranchContext.create(
@@ -383,42 +386,6 @@ with BranchContext.create(
 ) as contexts:
     for ctx in contexts:
         ctx.wait(timeout=60)
-```
-
-Any agent pattern can also opt into process isolation:
-
-```python
-outcome = Speculate(candidates, isolate_processes=True, timeout=60)(ws)
-```
-
-### Resource limits
-
-Constrain per-branch memory and CPU via setrlimit(2). Passing
-`resource_limits` to any pattern automatically enables process isolation -
-each branch runs in a forked child with limits enforced.
-
-```python
-from branching import ResourceLimits, BestOfN
-
-limits = ResourceLimits(memory=512 * 1024 * 1024, cpu_time=30)  # 512 MB, 30s CPU
-
-outcome = BestOfN(candidates, resource_limits=limits)(ws)
-```
-
-All patterns accept `resource_limits`: `Speculate`, `BestOfN`, `Reflexion`,
-`TreeOfThoughts`, `BeamSearch`, `Tournament`, and `Cascaded`. Fields default to `None`
-(unlimited). A `ResourceLimits()` with all `None` fields triggers process
-isolation without applying any limits.
-
-You can also pass limits directly to `BranchContext`:
-
-```python
-from branching import BranchContext, ResourceLimits
-
-limits = ResourceLimits(memory=1024 * 1024 * 1024)  # 1 GB
-
-with BranchContext(run_agent, workspace=branch.path, limits=limits) as ctx:
-    ctx.wait(timeout=30)
 ```
 
 ## CLI
@@ -435,8 +402,6 @@ Run a command in a new branch. Commits on exit 0, aborts on non-zero.
 branching run -- ./build.sh
 branching run --on-error none -- python train.py
 branching run --ask -- make test          # prompt before commit/abort
-branching run --memory-limit 512M -- ./agent.sh   # cap memory at 512 MB
-branching run --memory-limit 1G --cpu-limit 0.5 -- python train.py
 ```
 
 ### speculate
@@ -446,7 +411,6 @@ Race N commands in parallel branches. First success wins.
 ```bash
 branching speculate -c "./fix_a.sh" -c "./fix_b.sh" -c "./fix_c.sh"
 branching speculate --timeout 60 -c "python solve_v1.py" -c "python solve_v2.py"
-branching speculate --memory-limit 256M -c "./a.sh" -c "./b.sh"
 ```
 
 ### best-of-n
@@ -461,7 +425,6 @@ Each child receives `BRANCHING_ATTEMPT` (0-indexed) in its environment.
 branching best-of-n -n 5 -- ./solve.py
 branching best-of-n -n 3 --timeout 120 --json -- python attempt.py
 branching best-of-n -n 3 -- bash -c 'python run.py && echo "$SCORE" >&3'
-branching best-of-n -n 5 --memory-limit 1G --cpu-limit 0.5 -- python attempt.py
 ```
 
 ### reflexion
@@ -475,7 +438,6 @@ The child receives `BRANCHING_ATTEMPT` (0-indexed) and `BRANCHING_FEEDBACK`
 branching reflexion --retries 5 -- ./fix.sh
 branching reflexion --retries 3 --critique "./review.sh" -- ./solve.py
 branching reflexion --retries 3 --critique "python critique.py" --json -- python agent.py
-branching reflexion --retries 3 --memory-limit 512M -- ./fix.sh
 ```
 
 ### status
@@ -496,20 +458,13 @@ first-winner-commit semantics.
 
 You just create a `Workspace` pointed at a mounted BranchFS path.
 
-Process isolation (`BranchContext`) uses fork + Landlock LSM + BPF LSM to
-sandbox each child process. No namespaces, no cgroups, no root required:
+Process forking (`BranchContext`) uses `fork(2)` + process groups to run
+each task in an isolated child process. The child's working directory is set
+to the branch path, and `mprotect(2)` enforces copy-on-write invariants on
+parent memory regions.
 
-- **Landlock LSM** (Linux 5.13+) confines each child to its own branch.
-  The child can read the filesystem outside the workspace but can only write
-  under its branch path. Sibling branches and the mount root are denied.
-  `LANDLOCK_ACCESS_FS_REFER` is included in the handled set so that
-  rename/link across the branch boundary is blocked.
-- **BPF LSM** provides inescapable process tracking. All descendants of a
-  branched process inherit the branch ID, enabling atomic teardown of an
-  entire branch's process tree. Requires `CONFIG_BPF_LSM=y` and
-  `lsm=...,bpf,...` in the kernel command line.
-- **setrlimit(2)** enforces per-branch resource limits (memory via
-  `RLIMIT_AS`, CPU time via `RLIMIT_CPU`, process count via `RLIMIT_NPROC`).
-  Lightweight alternative to cgroups -- no cgroupfs infrastructure needed,
-  limits are inherited by children on fork.
+BranchContext focuses purely on branching. For sandboxing (filesystem
+confinement, syscall filtering, resource limits), use
+[sandlock](https://github.com/multikernel/sandlock) alongside branching --
+the two are designed to compose together.
 

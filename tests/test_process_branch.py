@@ -5,28 +5,11 @@ import os
 import time
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from branching.process.context import BranchContext
 from branching.exceptions import ProcessBranchError
-
-
-# Mock BPF tracker and Landlock for all tests that fork — BPF LSM
-# requires CAP_BPF and Landlock requires CONFIG_SECURITY_LANDLOCK,
-# which CI environments typically lack.
-@pytest.fixture(autouse=True)
-def _mock_bpf_and_landlock():
-    mock_tracker = MagicMock()
-    mock_tracker.register.return_value = 1
-    with patch(
-        "branching.process.context.BpfProcessTracker.get",
-        return_value=mock_tracker,
-    ), patch(
-        "branching.process.context.confine_to_branch",
-    ):
-        yield
 
 
 def test_basic_success():

@@ -4,25 +4,10 @@
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from branching.process.runner import run_in_process
-
-
-# Mock BPF tracker and Landlock for all tests that fork.
-@pytest.fixture(autouse=True)
-def _mock_bpf_and_landlock():
-    mock_tracker = MagicMock()
-    mock_tracker.register.return_value = 1
-    with patch(
-        "branching.process.context.BpfProcessTracker.get",
-        return_value=mock_tracker,
-    ), patch(
-        "branching.process.context.confine_to_branch",
-    ):
-        yield
 
 
 def test_fork_runs_in_child_process():
@@ -63,12 +48,12 @@ def test_fork_inherits_parent_memory():
     del _self_module._inherited_value
 
 
-def test_fork_without_resource_limits():
-    """run_in_process works with limits=None (fork without resource limits)."""
+def test_fork_basic_return():
+    """run_in_process returns the callable's result."""
     def task(workspace):
         return 42
 
     with tempfile.TemporaryDirectory() as ws:
         ws_path = Path(ws)
-        result = run_in_process(task, (ws_path,), workspace=ws_path, limits=None)
+        result = run_in_process(task, (ws_path,), workspace=ws_path)
         assert result == 42

@@ -5,15 +5,12 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from pathlib import Path
-from typing import Callable, Sequence, Optional, TYPE_CHECKING
+from typing import Callable, Sequence, Optional
 import threading
 
 from ..core.workspace import Workspace
 from ..exceptions import ConflictError
 from .result import SpeculationResult, SpeculationOutcome
-
-if TYPE_CHECKING:
-    from ..process.limits import ResourceLimits
 
 
 class Speculate:
@@ -35,8 +32,6 @@ class Speculate:
         first_wins: bool = True,
         max_parallel: int | None = None,
         timeout: float | None = None,
-        resource_limits: ResourceLimits | None = None,
-        group_limits: ResourceLimits | None = None,
     ):
         """
         Args:
@@ -46,23 +41,13 @@ class Speculate:
                 abort siblings. If False, run all and commit the first success.
             max_parallel: Maximum parallel workers (default: len(candidates)).
             timeout: Overall timeout in seconds for all candidates.
-            resource_limits: Optional per-branch resource limits.
-            group_limits: Optional group-level resource limits applied
-                via setrlimit before forking (inherited by all branches).
         """
         self._candidates = list(candidates)
         self._first_wins = first_wins
         self._max_parallel = max_parallel or len(self._candidates)
         self._timeout = timeout
-        self._resource_limits = resource_limits
-        self._group_limits = group_limits
 
     def __call__(self, workspace: Workspace) -> SpeculationOutcome:
-        # Apply group-level limits to this process (inherited by all forks)
-        if self._group_limits is not None:
-            from ..process._prlimit import apply_limits
-            apply_limits(self._group_limits)
-
         return self._run(workspace)
 
     def _run(self, workspace: Workspace) -> SpeculationOutcome:
@@ -70,18 +55,6 @@ class Speculate:
         winner: Optional[SpeculationResult] = None
         committed = False
         cancel_event = threading.Event()
-
-        # Track child PIDs so we can kill losers immediately via process
-        # tracker.  dict ops are GIL-protected in CPython.
-        branch_pids: dict[int, int] = {}
-
-        def _kill_branches(exclude: int = -1) -> None:
-            """Kill all tracked branch processes except *exclude*."""
-            from ..process._process_tracker import BpfProcessTracker
-            tracker = BpfProcessTracker.get()
-            for idx, pid in list(branch_pids.items()):
-                if idx != exclude:
-                    tracker.kill_branch(pid)
 
         def _run_candidate(index: int) -> SpeculationResult:
             branch_name = f"speculate_{index}"
@@ -100,12 +73,8 @@ class Speculate:
                         b.abort()
                         return result
 
-                    def _on_pid(pid: int, _i: int = index) -> None:
-                        branch_pids[_i] = pid
-
-                    success = self._run_with_limits(
+                    success = self._run_in_branch(
                         b.path, b.mount_root, index,
-                        pid_callback=_on_pid if self._resource_limits else None,
                     )
 
                     result.success = bool(success)
@@ -114,7 +83,6 @@ class Speculate:
                     if result.success and not cancel_event.is_set():
                         if self._first_wins:
                             cancel_event.set()
-                            _kill_branches(index)
                         try:
                             b.commit()
                         except ConflictError:
@@ -153,7 +121,6 @@ class Speculate:
             except TimeoutError:
                 # Signal remaining candidates to abort
                 cancel_event.set()
-                _kill_branches()
 
             # Wait briefly for in-flight branches to finish cleanup
             for f in futures:
@@ -174,11 +141,10 @@ class Speculate:
             committed=committed,
         )
 
-    def _run_with_limits(
+    def _run_in_branch(
         self, path: Path, mount_root: Path, index: int,
-        pid_callback=None,
     ) -> bool:
-        """Run a candidate in a forked child with resource limits."""
+        """Run a candidate in a forked child."""
         from ..process.runner import run_in_process
         from ..exceptions import ProcessBranchError
 
@@ -194,9 +160,7 @@ class Speculate:
                 (path,),
                 workspace=path,
                 mount_root=mount_root,
-                limits=self._resource_limits,
                 timeout=per_candidate,
-                pid_callback=pid_callback,
             )
             return bool(result)
         except ProcessBranchError:

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from branching import BestOfN, Workspace
 
-from . import _parse_group_limits, _parse_resource_limits, _print_error, _resolve_workspace
+from . import _print_error, _resolve_workspace
 
 
 def _make_candidate(cmd: list[str], index: int):
@@ -69,9 +69,7 @@ def cmd_best_of_n(args) -> int:
     ws = Workspace(ws_path)
 
     candidates = [_make_candidate(args.cmd, i) for i in range(args.n)]
-    limits = _parse_resource_limits(args)
-    group_limits = _parse_group_limits(args)
-    best = BestOfN(candidates, timeout=args.timeout, resource_limits=limits, group_limits=group_limits)
+    best = BestOfN(candidates, timeout=args.timeout)
     outcome = best(ws)
 
     results_summary = []
